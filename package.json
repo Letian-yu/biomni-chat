@@ -1,0 +1,71 @@
+{
+  "name": "biomni-chat",
+  "displayName": "Biomni Chat",
+  "description": "Biomni AI agent chat for VS Code on your Linux bioinformatics server",
+  "version": "0.0.1",
+  "publisher": "biomni-chat",
+  "license": "Apache-2.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "activationEvents": [
+    "onCommand:biomniChat.open"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "biomni",
+    "bioinformatics",
+    "ai-agent",
+    "chat",
+    "research"
+  ],
+  "main": "./out/extension.js",
+  "files": [
+    "out/**",
+    "python/**",
+    "README.md"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "biomniChat.open",
+        "title": "Biomni Chat: Open Chat"
+      }
+    ],
+    "configuration": {
+      "title": "Biomni Chat",
+      "properties": {
+        "biomniChat.pythonPath": {
+          "type": "string",
+          "default": "/data/biomni/envs/biomni_e1/bin/python",
+          "description": "Absolute path to the Python interpreter of the biomni environment."
+        },
+        "biomniChat.bridgeScript": {
+          "type": "string",
+          "default": "/data/biomni-chat/python/biomni_bridge.py",
+          "description": "Absolute path to the Biomni bridge script."
+        },
+        "biomniChat.envFile": {
+          "type": "string",
+          "default": "/data/biomni/.env",
+          "description": "Path to the .env file containing BYOK LLM configuration."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "node ./scripts/build.js",
+    "watch": "node ./scripts/build.js --watch",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "esbuild": "^0.21.5",
+    "typescript": "^5.4.0",
+    "vite": "^5.4.0"
+  }
+}

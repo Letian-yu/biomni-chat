@@ -1,0 +1,20 @@
+# Node
+node_modules/
+out/
+
+# Python
+__pycache__/
+*.pyc
+
+# 环境/密钥（绝不提交）
+.env
+*.env
+!python/.env.example
+
+# VS Code / IDE
+.vscode/
+*.vsix
+
+# 日志/临时
+*.log
+.DS_Store
