@@ -5,6 +5,10 @@
   "version": "0.0.1",
   "publisher": "biomni-chat",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Letian-yu/biomni-chat.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },

@@ -4,6 +4,28 @@
 
 Biomni AI agent chat for VS Code, running on your Linux bioinformatics server.
 
+## Features
+- **Plan / Act 双模式**：Plan 自动识别任务类型——分析型走完整规划流程（调研→澄清→计划→确认→执行）；调研/咨询型直接执行
+- **澄清引擎**：选择题（带 LLM 推荐与利弊权衡）→ 可编辑研究计划 → 确认后执行
+- **执行过程时间线**：思维链 + 工具调用交错展示，状态颜色编码（思考/工具/代码/完成/错误）
+- **多会话管理**：侧边栏会话列表、LLM 自动命名、本地持久化（重启保留）、上下文隔离
+- **消息操作**：复制 / 重试 / 编辑重发 / 还原检查点 / 删除
+- **设置页**：BYOK 模型配置（DeepSeek / OpenAI / Anthropic / 自定义）、镜像源、环境检测、一键部署（L0+L1）与数据湖下载（L2）
+- **报告导出**：会话 / 研究计划 / 执行报告导出为 Markdown
+- **@ 文件提及**：把工作区文件内容注入给 agent
+
+## Installation
+1. 从 [Releases](../../releases) 下载最新的 `biomni-chat-x.y.z.vsix`
+2. VS Code → 扩展 → `...` → 从 VSIX 安装
+3. 通过 **Remote-SSH** 连接你的 Linux 服务器后打开
+
+> ⚠️ 本插件仅支持 Linux 服务器（通过 Remote-SSH 使用）。在本地 Windows/macOS 直接运行时，设置页会警告并拒绝部署环境。
+
+## Quick Start
+1. 打开 Biomni Chat（命令面板 → `Biomni Chat: Open Chat`）
+2. 首次使用：进入「设置」→ 配置模型（BYOK）→ 测试连接 → 环境检测 → 一键部署（L0+L1，约 30-60 分钟）
+3. 开始对话：**Plan** 模式发研究任务（自动规划），**Act** 模式直接执行
+
 ## Platform Support
 | Platform | Architecture | Support |
 |----------|--------------|---------|
