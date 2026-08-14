@@ -179,8 +179,7 @@ function saveByok(byok: ByokConfig, apiKey: string): void {
 }
 
 /** 一键部署（L0+L1）：无 biomni_e1 环境则跑完整脚本；有则快速升级 biomni */
-async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {
-  const progress = (line: string) => panel.webview.postMessage({ type: "deploy_progress", line, source: "deploy" })
+async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {  const progress = (line: string) => panel.webview.postMessage({ type: "deploy_progress", line, source: "deploy" })
   // SSH/平台检测：非 Linux 主机拒绝部署
   const remote = detectRemoteStatus()
   if (!remote.ok) {
@@ -223,6 +222,10 @@ async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {
           ? "✅ L0+L1 部署完成（biomni 核心 + 生信工具 + 生物库 + R）。\n如需数据湖(L2)，点下方「下载数据湖」。"
           : `部署退出码: ${code}，请查看上方输出。`,
       })
+      // 完整部署后应用 biomni-chat 补丁（会话级记忆等），否则新装环境缺失补丁
+      if (code === 0) {
+        await applyPatch(panel, py)
+      }
       void checkEnv(panel)
     })
     return
@@ -268,8 +271,40 @@ async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {
       })
     } catch {
       panel.webview.postMessage({ type: "deploy_result", source: "deploy", ok: false, message: "⚠ A1 导入验证失败，请查看上方输出。" })
+      return
     }
+    // 关键：pip 升级 biomni 会覆盖 site-packages 里的补丁，必须重新打上
+    await applyPatch(panel, py)
     void checkEnv(panel)
+  })
+}
+
+/** 应用 biomni-chat 对 A1 的补丁（会话级记忆 thread 隔离等）。每次部署/升级后都应执行 */
+async function applyPatch(panel: vscode.WebviewPanel, py: string): Promise<void> {
+  const progress = (line: string) =>
+    panel.webview.postMessage({ type: "deploy_progress", line, source: "deploy" })
+  const patchScript = path.join(__dirname, "..", "python", "patch_a1.py")
+  if (!fs.existsSync(patchScript)) {
+    progress(`⚠️ 未找到补丁脚本 ${patchScript}，跳过（请确认插件版本包含 python/patch_a1.py）`)
+    return
+  }
+  progress("▶ 应用 biomni-chat 补丁（会话级记忆 thread 隔离）...")
+  return new Promise<void>((resolve) => {
+    const child = spawn(py, [patchScript], { env: { ...process.env, PYTHONUNBUFFERED: "1" } })
+    child.stdout.on("data", (d: Buffer) => progress(d.toString()))
+    child.stderr.on("data", (d: Buffer) => progress(d.toString()))
+    child.on("error", (e) => {
+      progress(`⚠️ 补丁执行失败: ${e.message}`)
+      resolve()
+    })
+    child.on("close", (code) => {
+      progress(
+        code === 0
+          ? "✅ biomni-chat 补丁应用完成（会话级记忆已启用）"
+          : `⚠️ 补丁退出码 ${code}，可手动运行: ${py} ${patchScript}`,
+      )
+      resolve()
+    })
   })
 }
 
