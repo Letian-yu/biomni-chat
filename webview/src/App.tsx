@@ -191,7 +191,7 @@ export default function App() {
     saveCurrentSession()
     setCurrentSessionId(id)
     setMessages(target.messages)
-    vscode.postMessage({ type: "new_conversation" }) // 切换会话 = 切换上下文（A1 记忆隔离）
+    // 会话记忆由 bridge 按 sessionId 自动隔离：发送时带上 id 即可，无需清空
   }
 
   const newSession = () => {
@@ -206,7 +206,7 @@ export default function App() {
     setSessions((prev) => [...prev, ns])
     setCurrentSessionId(ns.id)
     setMessages([])
-    vscode.postMessage({ type: "new_conversation" })
+    // 新会话首次发送时携带 ns.id，bridge 自动为该会话创建独立的 A1 记忆 thread
   }
 
   // 导出会话报告为 Markdown（存服务器 biomni_reports/）
@@ -243,7 +243,7 @@ export default function App() {
         const target = next[0]
         setCurrentSessionId(target.id)
         setMessages(target.messages)
-        vscode.postMessage({ type: "new_conversation" })
+        // 切换目标会话；A1 记忆由发送时的 sessionId 自动切换
       }
       return next
     })
@@ -493,7 +493,7 @@ export default function App() {
         taskExpanded: true,
       },
     ])
-    vscode.postMessage({ type: "send", prompt, mode, history })
+    vscode.postMessage({ type: "send", prompt, mode, history, sessionId: currentSessionId })
     setInput("")
     setMentionOpen(false)
     setBusy(true)

@@ -53,6 +53,7 @@ export interface WebviewToExt {
   type: "send" | "ready" | "clarify_answer" | "plan_confirm" | "plan_edit" | "cancel" | "mention_open" | "new_conversation" | "export_report" | "settings_load" | "settings_save" | "settings_test" | "mirror_save" | "env_check" | "deploy" | "deploy_l2" | "generate_title"
   prompt?: string
   mode?: ChatMode
+  sessionId?: string // 会话 id（bridge 按会话隔离 A1 记忆）
   questionId?: number
   option?: string
   answer?: string
@@ -89,6 +90,7 @@ export interface BridgeRequest {
   type: "chat" | "ping" | "cancel" | "clarify_answer" | "plan_confirm" | "plan_edit" | "new_conversation"
   prompt?: string
   mode?: ChatMode
+  session_id?: string
   questionId?: number
   option?: string
   answer?: string

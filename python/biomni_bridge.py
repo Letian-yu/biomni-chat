@@ -121,6 +121,45 @@ def scan_deliverables(output_dir: str) -> list[dict]:
 _orig_stdout = sys.stdout
 _MAX_CLARIFY_ROUNDS = 4
 
+# ---- 会话级记忆（方案2：thread 隔离，替代粗暴 reset）----
+# LangGraph MemorySaver 原生支持多 thread_id 隔离。A1 原本写死 thread_id=42，
+# 已 patch site-packages a1.py 使其读取 agent._thread_id。这里维护 session_id -> thread_id 映射：
+#   - 同会话连续 chat：复用 thread → A1 记住所有轮次（真多轮）
+#   - 新会话（未知 session_id）：新建 thread → 天然干净（无需 reset_agent_memory）
+#   - 跨会话隔离：不同 thread 互不干扰（根治 GSE30691 污染 HCMV 类问题）
+_threads: dict[str, str] = {}
+_thread_seq = 0
+
+
+def _new_thread_id() -> str:
+    global _thread_seq
+    _thread_seq += 1
+    return f"biomni-{_thread_seq}-{int(time.time() * 1000)}"
+
+
+def _resolve_thread(agent, session_id: str | None) -> None:
+    """根据会话 id 设置 agent._thread_id：已有会话复用（保留记忆），新会话新建（干净）。"""
+    if session_id:
+        tid = _threads.get(session_id)
+        if tid is None:
+            tid = _new_thread_id()
+            _threads[session_id] = tid
+            log_line("=== 新会话 thread 创建: session=", session_id, "->", tid)
+    else:
+        tid = getattr(agent, "_thread_id", None) or _new_thread_id()
+    agent._thread_id = tid
+
+
+def _clear_thread(session_id: str | None = None) -> None:
+    """显式清空指定会话（或全部）的 thread 记忆。"""
+    global _threads
+    if session_id:
+        _threads.pop(session_id, None)
+        log_line("=== 清空会话记忆: session=", session_id)
+    else:
+        _threads = {}
+        log_line("=== 清空全部会话记忆 ===")
+
 
 def send(msg: dict) -> None:
     _orig_stdout.write(json.dumps(msg, ensure_ascii=False) + "\n")
@@ -860,6 +899,7 @@ def main() -> None:
     from biomni.agent import A1  # noqa: E402
 
     agent = A1(path=_BIOMNI_DIR, expected_data_lake_files=[])
+    agent._thread_id = _new_thread_id()  # 初始会话 thread
 
     sys.stdout = _saved
 
@@ -882,9 +922,9 @@ def main() -> None:
             elif req_type == "cancel":
                 print("[biomni-bridge] cancel (idle)", file=sys.stderr)
             elif req_type == "new_conversation":
-                # 用户开启新对话：清空 A1 记忆，避免旧课题污染
-                reset_agent_memory(agent)
-                print("[biomni-bridge] new conversation (memory reset)", file=sys.stderr)
+                # 显式清空会话记忆（带 session_id 清该会话；不带清全部，兼容旧前端）
+                _clear_thread(req.get("session_id"))
+                print("[biomni-bridge] new conversation (memory cleared)", file=sys.stderr)
             elif req_type == "generate_title":
                 title = generate_title(req.get("prompt", ""))
                 if title:
@@ -894,9 +934,10 @@ def main() -> None:
                 # 仅支持 plan / act 两模式（Ask 已砍掉）；默认 plan
                 mode = req.get("mode", "plan")
                 print(f"[biomni-bridge] chat mode={mode}", file=sys.stderr)
-                # 每次 chat 前重置 A1 记忆（防跨消息/跨课题污染）
-                reset_agent_memory(agent)
-                # 注入前端显式传来的对话历史（保留同课题连续对话的上文）
+                # 会话级记忆：按 session_id 解析 thread（同会话复用记忆=真多轮；
+                # 新会话新建 thread=干净）。不再无条件 reset，避免跨轮失忆。
+                _resolve_thread(agent, req.get("session_id"))
+                # 注入前端显式传来的对话历史（兜底：bridge 重启/冷启动时帮助对齐）
                 history = req.get("history") or []
                 ctx = build_history_context(history)
                 if ctx:

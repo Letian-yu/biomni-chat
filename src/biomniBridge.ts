@@ -66,8 +66,18 @@ export class BiomniBridge {
     this.proc?.stdin.write(JSON.stringify(req) + "\n")
   }
 
-  chat(prompt: string, mode: "plan" | "act" = "plan", history?: { role: string; content: string }[]): void {
-    this.send({ type: "chat", prompt, mode, history })
+  chat(
+    prompt: string,
+    mode: "plan" | "act" = "plan",
+    history?: { role: string; content: string }[],
+    sessionId?: string,
+  ): void {
+    this.send({ type: "chat", prompt, mode, history, session_id: sessionId })
+  }
+
+  /** 显式清空指定会话记忆（bridge 按 session_id 隔离 A1 记忆） */
+  clearConversation(sessionId?: string): void {
+    this.send({ type: "new_conversation", session_id: sessionId })
   }
 
   /** 开启新对话：清空 A1 会话记忆，避免旧课题污染 */
