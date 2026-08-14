@@ -66,7 +66,7 @@ export class BiomniBridge {
     this.proc?.stdin.write(JSON.stringify(req) + "\n")
   }
 
-  chat(prompt: string, mode: "ask" | "plan" | "act" = "ask", history?: { role: string; content: string }[]): void {
+  chat(prompt: string, mode: "plan" | "act" = "plan", history?: { role: string; content: string }[]): void {
     this.send({ type: "chat", prompt, mode, history })
   }
 

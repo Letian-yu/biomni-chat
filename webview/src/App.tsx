@@ -30,10 +30,11 @@ interface ChatMessage {
   reasoning?: string[] // 思维链（<think> 内容，对齐 Roo ReasoningBlock）
   reasoningExpanded?: boolean // 思维链是否展开（默认展开）
   timeline?: TimelineItem[] // 执行过程时间线（思考+工作交错）
-  todos?: { text: string; status: "pending" | "in_progress" | "done" }[] // 执行步骤进度（对齐 Roo TodoList）
+  todos?: { id?: string; text: string; status: "pending" | "in_progress" | "completed"; source?: "plan" | "checklist" }[] // 执行步骤进度（对齐 Roo TodoList）
+  deliverables?: { dir: string; items: { name: string; path: string; size: number }[] } // 交付物清单（A1 真实落盘文件 + 绝对路径）
 }
 
-type Mode = "ask" | "plan" | "act"
+type Mode = "plan" | "act"  // Ask 已砍掉
 
 // 执行过程时间线条目（思考/工作交错，按时间顺序）
 interface TimelineItem {
@@ -66,13 +67,13 @@ const MODES: { key: Mode; label: string; hint: string }[] = [
 const OTHER_LABEL = "其他（自由填写）"
 
 // 从计划文本提取执行步骤（编号/列表行，最多 10 个）
-function extractTodos(plan?: string): { text: string; status: "pending" | "in_progress" | "done" }[] {
+function extractTodos(plan?: string): { id?: string; text: string; status: "pending" | "in_progress" | "completed"; source?: "plan" | "checklist" }[] {
   if (!plan) return []
-  const todos: { text: string; status: "pending" | "in_progress" | "done" }[] = []
+  const todos: { id?: string; text: string; status: "pending" | "in_progress" | "completed"; source?: "plan" | "checklist" }[] = []
   for (const line of plan.split("\n")) {
     const m = line.match(/^\s*(?:\d+[.、)]|[-*])\s+(.+)$/)
     if (m && m[1].trim().length > 3) {
-      todos.push({ text: m[1].trim().slice(0, 60), status: "pending" })
+      todos.push({ text: m[1].trim().slice(0, 60), status: "pending", source: "plan" })
       if (todos.length >= 10) break
     }
   }
@@ -127,6 +128,15 @@ export default function App() {
   const [mentionFilter, setMentionFilter] = useState("")
   const bottomRef = useRef<HTMLDivElement>(null)
   const mentionRef = useRef<HTMLDivElement>(null)
+  // ⚠️ 消息监听 useEffect 依赖为 []，其闭包只能拿到首次渲染的 state；
+  // 必须用 ref 保持最新值，否则 LLM 异步返回的 title 会写到错误的会话
+  const currentSessionIdRef = useRef(currentSessionId)
+  const stateMessagesRef = useRef(messages)
+  const pendingTitleSessionRef = useRef<string | null>(null) // 标题归属会话（触发 generate_title 时记录）
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId
+    stateMessagesRef.current = messages
+  }, [currentSessionId, messages])
   // 滚动控制（对齐 Roo ChatView isAtBottomRef）：仅在用户位于底部时自动滚动
   const messagesRef = useRef<HTMLDivElement>(null)
   const atBottomRef = useRef(true)
@@ -269,9 +279,10 @@ export default function App() {
             prev && prev.kind === "work" && prev.text === text
               ? timeline
               : [...timeline, { kind: "work" as const, text }]
-          // 执行步骤进度：按工作条目数粗粒度推进（对齐 Roo TodoList）
+          // 执行步骤进度：按工作条目数粗粒度推进（仅对 planDraft 提取的 todo 生效；
+          // 原生 checklist（source=checklist）由 bridge 的 todo_update 精确驱动，这里跳过）
           let todos = last.todos
-          if (todos && todos.length > 0) {
+          if (todos && todos.length > 0 && todos[0]?.source !== "checklist") {
             const workCount = newTimeline.filter((t) => t.kind === "work").length
             const active = Math.min(Math.floor(workCount / 2), todos.length - 1)
             todos = todos.map((td, k) => ({
@@ -302,6 +313,34 @@ export default function App() {
         }))
       } else if (msg.type === "report") {
         patchLast((last) => ({ ...last, report: String(msg.content ?? ""), reportExpanded: false }))
+      } else if (msg.type === "todo_update") {
+        // 原生 checklist 动态 todo（bridge 驱动，对齐 Roo TodoList）
+        const items = Array.isArray(msg.items) ? msg.items : []
+        if (items.length > 0) {
+          patchLast((last) => ({
+            ...last,
+            todos: items.map((t) => ({
+              id: t.id,
+              text: String(t.content ?? "").slice(0, 120),
+              status:
+                t.status === "completed"
+                  ? ("completed" as const)
+                  : t.status === "in_progress"
+                    ? ("in_progress" as const)
+                    : ("pending" as const),
+              source: "checklist" as const,
+            })),
+          }))
+        }
+      } else if (msg.type === "deliverables") {
+        // A1 真实落盘的交付物（含绝对路径）
+        const items = Array.isArray(msg.items) ? msg.items : []
+        if (items.length > 0) {
+          patchLast((last) => ({
+            ...last,
+            deliverables: { dir: String(msg.dir ?? ""), items },
+          }))
+        }
       } else if (msg.type === "stream") {
         // 最终回答流式追加（打字机效果）
         const text = String(msg.content ?? "")
@@ -321,12 +360,16 @@ export default function App() {
           }
         })
       } else if (msg.type === "title") {
-        // LLM 生成的会话标题：更新当前会话
+        // LLM 生成的会话标题：写回「发起该消息的会话」（异步返回时可能已切换/新建会话）
         const t = String(msg.content ?? "").trim()
         if (t) {
-          setSessions((prev) =>
-            prev.map((s) => (s.id === currentSessionId ? { ...s, title: t } : s)),
-          )
+          const sid = pendingTitleSessionRef.current ?? currentSessionIdRef.current
+          pendingTitleSessionRef.current = null
+          if (sid) {
+            setSessions((prev) =>
+              prev.map((s) => (s.id === sid ? { ...s, title: t } : s)),
+            )
+          }
         }
       } else if (msg.type === "mention_files") {
         setMentionFiles(Array.isArray(msg.files) ? msg.files : [])
@@ -335,8 +378,8 @@ export default function App() {
         setMode("act")
         if (msg.fresh) {
           // plan 确认后：新建一条独立的 Act 执行卡片（区别于 plan 卡片）
-          // 从最近的研究计划提取执行步骤（todo）
-          const lastPlan = [...messages].reverse().find((mm) => mm.planDraft)?.planDraft
+          // 从最近的研究计划提取执行步骤（todo）——用 ref 避免闭包拿到旧会话消息
+          const lastPlan = [...stateMessagesRef.current].reverse().find((mm) => mm.planDraft)?.planDraft
           const todos = extractTodos(lastPlan)
           setMessages((prev) => [
             ...prev,
@@ -354,7 +397,7 @@ export default function App() {
           ])
           setBusy(true)
         } else {
-          // ask/research 直接执行：更新已有占位消息 + 显式告知用户已切换模式
+          // act/research 直接执行：更新已有占位消息 + 显式告知用户已切换模式
           patchLast((last) => {
             const timeline = last.timeline ?? []
             const notice = "已自动切换到 Act 模式执行（调研/咨询类任务直接执行，不再走计划流程）"
@@ -372,7 +415,7 @@ export default function App() {
           content: String(msg.result ?? ""),
           finishedAt: Date.now(),
           taskExpanded: false, // 开始生成总回复：收起工作状态，让位给正式回答
-          todos: last.todos?.map((td) => ({ ...td, status: "done" as const })),
+          todos: last.todos?.map((td) => ({ ...td, status: "completed" as const })),
         }))
         setBusy(false)
         setMentionOpen(false)
@@ -431,8 +474,9 @@ export default function App() {
       .map((mm) => ({ role: mm.role, content: mm.content || mm.taskStatus || "" }))
       .filter((h) => h.content.trim())
       .slice(-4)
-    // 新会话首次发送：请求 LLM 生成简洁标题
+    // 新会话首次发送：请求 LLM 生成简洁标题（记录归属会话，防止异步返回时串到别的会话）
     if (msgs.length === 0) {
+      pendingTitleSessionRef.current = currentSessionId
       vscode.postMessage({ type: "generate_title", prompt })
     }
     setMessages([
@@ -777,9 +821,9 @@ export default function App() {
                   {m.todos && m.todos.length > 0 && (
                     <div className="todo-list" onClick={(e) => e.stopPropagation()}>
                       {m.todos.map((td, k) => (
-                        <div key={k} className={`todo-item ${td.status}`}>
+                        <div key={td.id || k} className={`todo-item ${td.status}`}>
                           <span className="todo-check">
-                            {td.status === "done" ? "✓" : td.status === "in_progress" ? "▶" : "○"}
+                            {td.status === "completed" ? "✓" : td.status === "in_progress" ? "▶" : "○"}
                           </span>
                           <span className="todo-text">{td.text}</span>
                         </div>
@@ -898,6 +942,49 @@ export default function App() {
               </div>
             )}
 
+            {/* ===== 交付物卡片（A1 真实落盘文件 + 绝对路径，点击复制） ===== */}
+            {m.role === "assistant" && m.deliverables && m.deliverables.items.length > 0 && (
+              <div className="deliverables-card">
+                <div className="deliverables-header">
+                  <span className="deliverables-title">
+                    📁 交付物（{m.deliverables.items.length} 个文件）
+                  </span>
+                  <button
+                    className="report-copy"
+                    onClick={() => copyText(m.deliverables!.dir)}
+                    title="复制交付物目录绝对路径"
+                  >
+                    复制目录路径
+                  </button>
+                </div>
+                <div className="deliverables-dir" onClick={() => copyText(m.deliverables!.dir)} title="点击复制">
+                  {m.deliverables.dir}
+                </div>
+                <ul className="deliverables-list">
+                  {m.deliverables.items.map((d, k) => (
+                    <li
+                      key={k}
+                      className="deliverable-item"
+                      onClick={() => copyText(d.path)}
+                      title={`点击复制路径\n${d.path}`}
+                    >
+                      <span className="deliverable-icon">
+                        {/\.(png|jpe?g|gif|svg|pdf|html)$/i.test(d.name) ? "🖼️" : "📄"}
+                      </span>
+                      <span className="deliverable-name">{d.name}</span>
+                      <span className="deliverable-size">
+                        {d.size > 1024 * 1024
+                          ? `${(d.size / 1024 / 1024).toFixed(1)} MB`
+                          : d.size > 1024
+                            ? `${(d.size / 1024).toFixed(1)} KB`
+                            : `${d.size} B`}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {/* ===== 报告卡片（Act / Plan 执行后） ===== */}
             {m.role === "assistant" && m.report && (
               <div className="report-card">
@@ -1000,7 +1087,7 @@ export default function App() {
               el.style.height = "auto"
               el.style.height = Math.min(el.scrollHeight, 160) + "px"
             }}
-            placeholder={`Ask Biomni... (${mode === "ask" ? "快速问答" : mode === "plan" ? "研究方案" : "完整任务"})  @引用文件 · Enter发送 · Shift+Enter换行`}
+            placeholder={`Ask Biomni... (${mode === "plan" ? "研究方案" : "完整任务"})  @引用文件 · Enter发送 · Shift+Enter换行`}
             disabled={busy}
             rows={1}
           />

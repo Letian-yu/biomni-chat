@@ -355,7 +355,7 @@ function openChatPanel(context: vscode.ExtensionContext): void {
         if (msg.prompt) {
           // 解析 prompt 中的 @文件 提及，把文件内容注入上下文
           injectMentionedFiles(panel, msg.prompt, (augmented) => {
-            bridge.chat(augmented, msg.mode || "ask")
+            bridge.chat(augmented, msg.mode || "plan")
           })
         }
         break

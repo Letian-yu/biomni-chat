@@ -37,12 +37,86 @@ try:
 except Exception:
     MemorySaver = None
 
-_dotenv_path = Path(__file__).resolve().parents[1] / ".env"
-if not _dotenv_path.exists():
-    _dotenv_path = Path("/data/biomni/.env")
-if _dotenv_path.exists():
-    load_dotenv(_dotenv_path)
-    print(f"[biomni-bridge] loaded env: {_dotenv_path}", file=sys.stderr)
+# ---- .env 加载（必须在 import biomni 之前！） ----
+# 坑: biomni 的 a1.py 在模块级 load_dotenv(".env")，但它在 default_config
+# (biomni/config.py 模块级创建) 之后才执行，导致 default_config 读不到 BIOMNI_*，
+# A1 会回退到默认 LLM 配置。因此这里必须在 import biomni 之前显式加载 .env。
+# 路径优先级: $BIOMNI_ENV_FILE > 本仓库 .env > $BIOMNI_DIR/.env（默认 /data/biomni）
+_BIOMNI_DIR = os.environ.get("BIOMNI_DIR", "/data/biomni")
+
+
+def _resolve_env_file() -> Path:
+    """解析 .env 文件路径。"""
+    if os.environ.get("BIOMNI_ENV_FILE"):
+        p = Path(os.environ["BIOMNI_ENV_FILE"])
+        if p.exists():
+            return p
+    p = Path(__file__).resolve().parents[1] / ".env"
+    if p.exists():
+        return p
+    return Path(_BIOMNI_DIR) / ".env"
+
+
+def _load_env() -> None:
+    """加载 .env 到 os.environ（幂等；override=False 让已有环境变量优先）。"""
+    p = _resolve_env_file()
+    if p.exists():
+        load_dotenv(p, override=False)
+        print(f"[biomni-bridge] loaded env: {p}", file=sys.stderr)
+    else:
+        print(f"[biomni-bridge] warning: no .env found at {p}", file=sys.stderr)
+
+
+_load_env()
+
+# ---- 落盘日志（复盘用）----
+# 记录每次 Ai 消息/工具/代码/轮次，便于排查"假完成"等异常。
+# 位置: $BIOMNI_BRIDGE_LOG_DIR 或 ~/.biomni-chat/bridge-<日期>.log
+_BRIDGE_LOG_DIR = os.environ.get("BIOMNI_BRIDGE_LOG_DIR") or os.path.join(
+    os.path.expanduser("~"), ".biomni-chat"
+)
+
+
+def _log_file_path() -> str:
+    os.makedirs(_BRIDGE_LOG_DIR, exist_ok=True)
+    return os.path.join(_BRIDGE_LOG_DIR, f"bridge-{time.strftime('%Y%m%d')}.log")
+
+
+def log_line(*parts) -> None:
+    """追加一行落盘日志（独立于 stdout 协议，任何异常不影响主流程）。"""
+    try:
+        ts = time.strftime("%H:%M:%S")
+        with open(_log_file_path(), "a", encoding="utf-8") as f:
+            f.write(f"[{ts}] " + " ".join(str(p) for p in parts) + "\n")
+    except Exception:
+        pass
+
+
+# ---- 交付物目录 ----
+# A1 报告里的相对路径（如 "output"）常是口头声称且不落盘，用户无法定位。
+# 这里固定一个真实交付物根目录：$BIOMNI_OUTPUT_DIR 可覆盖，默认 <biomni_dir>/biomni_data/output。
+# 每次执行创建独立子目录，结束由 bridge 扫描真实产物并连同绝对路径发给前端。
+_OUTPUT_DIR = os.environ.get("BIOMNI_OUTPUT_DIR") or os.path.join(
+    _BIOMNI_DIR, "biomni_data", "output"
+)
+
+
+def scan_deliverables(output_dir: str) -> list[dict]:
+    """扫描交付物目录，返回真实存在的文件清单 [{name, path, size}]（按路径排序）。"""
+    files: list[dict] = []
+    if not os.path.isdir(output_dir):
+        return files
+    for root, _dirs, fnames in os.walk(output_dir):
+        for fn in fnames:
+            fp = os.path.join(root, fn)
+            try:
+                size = os.path.getsize(fp)
+            except Exception:
+                size = 0
+            files.append({"name": os.path.relpath(fp, output_dir), "path": fp, "size": size})
+    files.sort(key=lambda x: x["name"])
+    return files
+
 
 _orig_stdout = sys.stdout
 _MAX_CLARIFY_ROUNDS = 4
@@ -193,6 +267,103 @@ def final_answer_from_log(agent) -> str:
     return ""
 
 
+# ============ 原生 checklist 提取 + bridge 驱动动态 todo（对齐 Roo TodoList）============
+# Roo 的 parseMarkdownChecklist 正则: /^(?:-\s*)?\[\s*([ xX\-~])\s*\]\s+(.+)$/
+# 这里扩展支持编号前缀（DeepSeek 实测输出 "1. [ ] 步骤"）
+_CHECKLIST_RE = re.compile(
+    r"^\s*(?:\d+[\.\)、]\s*)?(?:[-*]\s*)?\[\s*([ xX\-~])\s*\]\s+(.+?)\s*$"
+)
+_TODO_ADVANCE_EVERY = 2  # 每 N 个执行动作（工具/代码 observation）推进一个 todo
+
+
+def _todo_id(text: str, status: str) -> str:
+    import hashlib
+
+    return hashlib.md5(f"{text}|{status}".encode("utf-8")).hexdigest()[:12]
+
+
+def parse_checklist(content: str) -> list[dict] | None:
+    """从 Ai 消息提取 checklist（对齐 Roo parseMarkdownChecklist + 编号支持）。
+    返回 [{'id','content','status'}]；无 checklist 返回 None。
+    """
+    items: list[dict] = []
+    for line in content.splitlines():
+        line = line.strip()
+        m = _CHECKLIST_RE.match(line)
+        if not m:
+            continue
+        marker, text = m.group(1), m.group(2).strip()
+        text = re.sub(r"\*\*(.+?)\*\*", r"\1", text)  # 去掉 DeepSeek 的 **加粗**
+        text = text.strip().rstrip(":").strip()
+        if not text:
+            continue
+        if marker in ("x", "X"):
+            status = "completed"
+        elif marker in ("-", "~"):
+            status = "in_progress"
+        else:
+            status = "pending"
+        items.append({"id": _todo_id(text, status), "content": text[:120], "status": status})
+    return items or None
+
+
+def _send_todos(items: list[dict] | None) -> None:
+    if items:
+        send({"type": "todo_update", "items": items, "source": "checklist"})
+
+
+def _same_todo_list(a: list[dict] | None, b: list[dict] | None) -> bool:
+    return bool(a and b and len(a) == len(b) and [t["id"] for t in a] == [t["id"] for t in b])
+
+
+def sync_todos_from_checklist(state: dict | None, parsed: list[dict]) -> dict:
+    """首次提取→初始化（激活第一项）；内容相同的重复输出→忽略（保留已推进状态）；
+    全新 checklist→替换。返回新 state。"""
+    if state is None:
+        state = {"items": [], "obs": 0}
+    current = state["items"]
+    if _same_todo_list(current, parsed):
+        return state  # 内容未变（DeepSeek 重复输出同一初始计划）→ 不覆盖已推进状态
+    todos = [dict(t) for t in parsed]
+    # 无进行中且未全完成 → 激活第一项
+    if not any(t["status"] == "in_progress" for t in todos) and not all(
+        t["status"] == "completed" for t in todos
+    ):
+        first = next((i for i, t in enumerate(todos) if t["status"] == "pending"), None)
+        if first is not None:
+            todos[first]["status"] = "in_progress"
+    _send_todos(todos)
+    return {"items": todos, "obs": 0}
+
+
+def advance_todos(state: dict | None) -> dict | None:
+    """每个执行动作（observation）调用：每 N 次把当前进行中项标记完成并激活下一项。"""
+    if not state:
+        return state
+    items = state["items"]
+    if not items or all(t["status"] == "completed" for t in items):
+        return state
+    state["obs"] += 1
+    if state["obs"] % _TODO_ADVANCE_EVERY != 0:
+        return state
+    idx = next((i for i, t in enumerate(items) if t["status"] == "in_progress"), None)
+    if idx is None:
+        idx = next((i for i, t in enumerate(items) if t["status"] == "pending"), None)
+        if idx is not None:
+            items[idx]["status"] = "in_progress"
+            _send_todos(items)
+        return state
+    items[idx]["status"] = "completed"
+    nxt = next(
+        (i for i, t in enumerate(items[idx + 1:], start=idx + 1) if t["status"] == "pending"),
+        None,
+    )
+    if nxt is not None:
+        items[nxt]["status"] = "in_progress"
+    _send_todos(items)
+    return state
+
+
 def check_cancel() -> bool:
     """非阻塞检查 stdin 是否有 cancel 消息。"""
     ready, _, _ = select.select([sys.stdin], [], [], 0)
@@ -335,16 +506,26 @@ def summarize_observation(obs: str) -> str:
         return ""
 
 
-def stream_agent(agent, task: str, max_rounds: int = 3) -> str:
-    """驱动 A1 go_stream，检测"提前收尾"并自动续跑；返回最终答案。
+def stream_agent(agent, task: str, max_rounds: int = 3, require_execution: bool = False) -> str:
+    """驱动 A1 go_stream，检测"提前收尾/假完成"并自动续跑；返回最终答案。
 
     - 支持 cancel（返回空串表示已取消）
     - A1 可能因 <solution> 提前 end 而只输出计划+第一步，检测到后用其输出继续驱动
+    - require_execution=True（分析执行阶段）：若一轮结束未执行任何工具/代码就输出
+      结论，判定为"假完成"并强制续跑（对齐 Roo：agent 必须通过工具/代码产出真实结果）
+    - 原生 checklist 提取 + bridge 驱动动态 todo（对齐 Roo TodoList）：
+      * 从 Ai 消息提取 A1 原生 checklist → 初始化 todo 列表（首个激活）
+      * DeepSeek 从不更新 checklist，故由 bridge 按执行动作（observation）数推进状态
     """
     current = task
+    todo_state = None  # {"items": [{id,content,status}], "obs": 执行动作计数}
+    log_line("=== stream_agent 开始 require_execution=", require_execution,
+             "| task:", task[:200].replace("\n", " "))
     for rnd in range(1, max_rounds + 1):
+        executed = False  # 本轮是否真实执行过工具/代码
         if rnd > 1:
             send({"type": "status", "text": f"检测到任务未完成，继续执行（第{rnd}轮）..."})
+        log_line(f"--- 第 {rnd} 轮开始 ---")
 
         _saved = sys.stdout
         sys.stdout = sys.stderr
@@ -357,6 +538,11 @@ def stream_agent(agent, task: str, max_rounds: int = 3) -> str:
                 mtype, content = parse_stream_output(out)
                 if mtype != "Ai" or not content:
                     continue
+                log_line(f"[Ai#{rnd}] {content[:2000]}")
+                # 原生 checklist 提取：A1 首轮输出编号 checkbox 计划（DeepSeek 实测约 75% 任务会输出）
+                parsed = parse_checklist(content)
+                if parsed:
+                    todo_state = sync_todos_from_checklist(todo_state, parsed)
                 # 思维链：优先 <think> 标签；否则提取标签前的文本作为思考/意图说明
                 # （对齐 Biomni a1.py 的 thinking 提取逻辑：execute/solution 标签前的文本）
                 think_m = re.search(r"<think>(.*?)</think>", content, re.DOTALL)
@@ -376,11 +562,13 @@ def stream_agent(agent, task: str, max_rounds: int = 3) -> str:
                     content,
                 )
                 if tool_m:
+                    executed = True
                     name = tool_m.group(1)
                     # 工具调用：提取关键参数拼成具体说明（如 检索 GSE30691）
                     desc = tool_call_desc(content, name)
                     send({"type": "status", "text": f"正在调用工具 {desc}"})
                 elif "<execute>" in content:
+                    executed = True
                     # 代码执行：用 LLM 概括这段代码在做什么（如 正在运行差异分析）
                     code = extract_execute_code(content)
                     desc = describe_code(code)
@@ -388,9 +576,11 @@ def stream_agent(agent, task: str, max_rounds: int = 3) -> str:
                         "type": "status",
                         "text": f"正在执行代码 · {desc}" if desc else "正在执行代码...",
                     })
-                # 工具/代码执行结果返回：生成简短总结（反馈工作量，也帮助 agent 回顾）
+                # 工具/代码执行结果返回：推进动态 todo + 生成简短总结（反馈工作量，也帮助 agent 回顾）
                 obs_m = re.search(r"<observation>(.*?)</observation>", content, re.DOTALL)
                 if obs_m and obs_m.group(1).strip():
+                    executed = True
+                    todo_state = advance_todos(todo_state)
                     summary = summarize_observation(obs_m.group(1))
                     if summary:
                         send({"type": "status", "text": f"已完成 · {summary}"})
@@ -400,6 +590,20 @@ def stream_agent(agent, task: str, max_rounds: int = 3) -> str:
         final = final_answer_from_log(agent)
         if not final:
             return ""
+        log_line(f"--- 第 {rnd} 轮结束: executed={executed} final={final[:300]!r} ---")
+        # 假完成检测：要求执行但本轮零执行且输出看似完成 → 强制续跑
+        if require_execution and not executed and not looks_incomplete(final):
+            send({"type": "status", "text": "检测到未实际执行任何工具/代码就输出结论，强制重新执行..."})
+            current = (
+                final
+                + "\n\n【重要！你刚才在没有执行任何工具调用或代码的情况下直接输出了结论，"
+                "这是不可接受的。你是在执行真实的数据分析任务，必须立即实际动手：\n"
+                "1. 先调用工具下载/查询数据，或读取本地文件\n"
+                "2. 运行真实的分析代码（<execute>），观察执行结果\n"
+                "3. 基于真实执行结果逐步完成所有步骤\n"
+                "禁止在未执行任何工具或代码时输出最终答案。"
+            )
+            continue
         if not looks_incomplete(final):
             return final
         # 提前收尾 -> 用当前输出作为新 prompt 续跑
@@ -461,42 +665,60 @@ def send_result_streaming(final: str) -> None:
     send({"type": "done", "result": final})
 
 
-def execute_act(agent, task: str, with_report: bool, fresh_task: bool = False) -> None:
+def execute_act(agent, task: str, with_report: bool, fresh_task: bool = False, require_execution: bool = False) -> None:
     """执行 A1 完整流程：act_start 标记新卡片；流式工作状态；可选生成研究报告；支持 cancel。
 
     fresh_task=True 时前端会新建一条 Act 执行消息（plan 确认后进入执行阶段）；
-    False 时复用已有的占位消息（ask/act 直接执行）。
+    False 时复用已有的占位消息（act 直接执行）。
+    require_execution=True（分析执行）时，若 A1 未执行任何工具/代码就输出结论会强制续跑。
+    交付物：每次执行创建独立子目录 <output>/<时间戳>/，纪律强制 A1 写绝对路径，
+    结束扫描真实文件并连同绝对路径发给前端（避免 A1 口头声称"output"却不落盘）。
     """
     send({"type": "act_start", "fresh": fresh_task, "mode": "act"})
     send({"type": "status", "text": "Act 模式执行中..."})
     # 执行阶段：确保关闭调研模式，允许下载数据与运行主分析
     agent.research_only_mode = False
+    # 交付物目录：本次执行独立子目录（隔离 + 便于扫描本次新增）
+    task_dir = os.path.join(_OUTPUT_DIR, time.strftime("%Y%m%d-%H%M%S"))
+    os.makedirs(task_dir, exist_ok=True)
     # 强化执行纪律：必须逐项完成计划所有步骤/交付物（对齐 Roo update_todo_list 逐项完成机制）
     execution_prompt = (
         f"{task}\n\n"
         "【执行纪律（必须严格遵守）】\n"
-        "1. 你正在执行用户已批准的研究计划，必须逐项完成计划中列出的每一个步骤与交付物\n"
-        "2. 每完成一个步骤，简要说明该步已完成\n"
-        "3. 计划中提到的所有图表/表格/结果文件都必须产出，不可遗漏"
+        "0. 禁止在未执行任何工具或代码时直接输出最终答案！你必须先实际动手：\n"
+        "   下载/读取数据、运行真实的分析代码（<execute>）、观察执行结果，\n"
+        "   再基于真实结果输出结论。未执行任何工具/代码就输出结论将被视为无效\n"
+        f"1. 所有交付物（图表/表格/结果文件）必须真实保存到绝对路径目录：{task_dir}\n"
+        "   （在该目录下创建子目录或直接写文件，用 os.path.join 拼接绝对路径，不要用相对路径）\n"
+        "2. 你正在执行用户已批准的研究计划，必须逐项完成计划中列出的每一个步骤与交付物\n"
+        "3. 每完成一个步骤，简要说明该步已完成\n"
+        "4. 计划中提到的所有图表/表格/结果文件都必须产出，不可遗漏"
         "（如火山图、热图、Venn图、富集分析图等，全部都要交付）\n"
-        "4. 全部步骤完成后，输出最终结果前，先逐条对照计划核对交付清单，补齐任何缺失项\n"
-        "5. 只有所有步骤与交付物都完成时才输出最终答案（放在 <solution> 标签内）"
+        "5. 全部步骤完成后，输出最终结果前，先逐条对照计划核对交付清单，补齐任何缺失项\n"
+        "6. 最终报告里必须列出所有交付物的完整绝对路径，供用户直接访问"
+        "（放在 <solution> 标签内）"
     )
-    final = stream_agent(agent, execution_prompt)
+    log_line("=== execute_act 开始 fresh=", fresh_task, "| task_dir=", task_dir,
+             "| task:", task[:200].replace("\n", " "))
+    final = stream_agent(agent, execution_prompt, require_execution=require_execution)
     if not final:
         send({"type": "done", "result": "[任务未产生有效结果]"})
         return  # 已取消或无结果
+    log_line("=== execute_act 完成，final 长度:", len(final))
     send_result_streaming(final)
+    # 扫描本次真实交付物（区别于 A1 口头声称），连同绝对路径发给前端
+    deliverables = scan_deliverables(task_dir)
+    if deliverables:
+        send({"type": "deliverables", "dir": task_dir, "items": deliverables})
+        log_line(f"=== 交付物 {len(deliverables)} 个: {task_dir}")
+    else:
+        log_line("=== 警告: task_dir 无任何交付物文件:", task_dir)
     if with_report and final:
         try:
             report = generate_report(task, final)
             send({"type": "report", "content": report})
         except Exception as e:  # noqa: BLE001
             send({"type": "status", "text": f"报告生成失败: {e}"})
-
-
-def handle_ask(agent, prompt: str) -> None:
-    execute_act(agent, prompt, with_report=False)
 
 
 _CLASSIFY_SYSTEM = (
@@ -543,7 +765,7 @@ def handle_research(agent, prompt: str) -> None:
 
 
 def handle_act(agent, prompt: str) -> None:
-    execute_act(agent, prompt, with_report=True)
+    execute_act(agent, prompt, with_report=True, require_execution=True)  # 分析执行：强制真实动手
 
 
 def handle_plan(agent, prompt: str) -> None:
@@ -623,18 +845,21 @@ def handle_plan(agent, prompt: str) -> None:
     if msg.get("type") == "plan_edit" and msg.get("content"):
         plan = msg["content"]
 
-    # 5. 确认 → 执行（前端创建新的 Act 执行卡片）
-    execute_act(agent, plan, with_report=True, fresh_task=True)
+    # 5. 确认 → 执行（前端创建新的 Act 执行卡片；分析执行强制真实动手）
+    execute_act(agent, plan, with_report=True, fresh_task=True, require_execution=True)
 
 
 def main() -> None:
+    # 保险：确保 .env 已加载（模块级已加载；此处防御未来 import 顺序变化）
+    _load_env()
+
     # A1 初始化期间的 print 会污染 stdout 协议 -> 先重定向到 stderr
     _saved = sys.stdout
     sys.stdout = sys.stderr
 
     from biomni.agent import A1  # noqa: E402
 
-    agent = A1(path="/data/biomni", expected_data_lake_files=[])
+    agent = A1(path=_BIOMNI_DIR, expected_data_lake_files=[])
 
     sys.stdout = _saved
 
@@ -666,7 +891,8 @@ def main() -> None:
                     send({"type": "title", "content": title})
             elif req_type == "chat":
                 prompt = req.get("prompt", "")
-                mode = req.get("mode", "ask")
+                # 仅支持 plan / act 两模式（Ask 已砍掉）；默认 plan
+                mode = req.get("mode", "plan")
                 print(f"[biomni-bridge] chat mode={mode}", file=sys.stderr)
                 # 每次 chat 前重置 A1 记忆（防跨消息/跨课题污染）
                 reset_agent_memory(agent)
@@ -675,12 +901,10 @@ def main() -> None:
                 ctx = build_history_context(history)
                 if ctx:
                     prompt = ctx + "\n\n" + prompt
-                if mode == "plan":
-                    handle_plan(agent, prompt)
-                elif mode == "act":
+                if mode == "act":
                     handle_act(agent, prompt)
                 else:
-                    handle_ask(agent, prompt)
+                    handle_plan(agent, prompt)
         except Exception as e:  # noqa: BLE001
             send({"type": "error", "message": str(e)})
 
