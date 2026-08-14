@@ -36,9 +36,9 @@ interface ChatMessage {
 
 type Mode = "plan" | "act"  // Ask 已砍掉
 
-// 执行过程时间线条目（思考/工作交错，按时间顺序）
+// 执行过程时间线条目（思考/工作交错，按时间顺序；work/code/done 为工作细分色）
 interface TimelineItem {
-  kind: "thinking" | "work"
+  kind: "thinking" | "work" | "code" | "done"
   text: string
 }
 
@@ -91,7 +91,15 @@ function TimelineBody({ items }: { items: TimelineItem[] }) {
     <div className="timeline-body" ref={ref} onClick={(e) => e.stopPropagation()}>
       {items.slice(-50).map((item, j) => (
         <div key={j} className={`timeline-item ${item.kind}`}>
-          <span className="timeline-kind">{item.kind === "thinking" ? "思考" : "执行"}</span>
+          <span className="timeline-kind">
+            {item.kind === "thinking"
+              ? "思考"
+              : item.kind === "code"
+                ? "代码"
+                : item.kind === "done"
+                  ? "完成"
+                  : "执行"}
+          </span>
           <span className="timeline-text">{item.text}</span>
         </div>
       ))}
@@ -272,18 +280,23 @@ export default function App() {
           const history = last.taskHistory ?? []
           const deduped =
             history.length > 0 && history[history.length - 1] === text ? history : [...history, text]
-          // 时间线：工作条目（去重相邻相同）
+          // 时间线：工作条目按状态细分（执行代码=紫 / 已完成=绿 / 其他=蓝），去重相邻相同
           const timeline = last.timeline ?? []
           const prev = timeline[timeline.length - 1]
+          const workKind: "work" | "code" | "done" = text.includes("执行代码")
+            ? "code"
+            : text.startsWith("已完成")
+              ? "done"
+              : "work"
           const newTimeline =
-            prev && prev.kind === "work" && prev.text === text
+            prev && prev.kind === workKind && prev.text === text
               ? timeline
-              : [...timeline, { kind: "work" as const, text }]
+              : [...timeline, { kind: workKind, text }]
           // 执行步骤进度：按工作条目数粗粒度推进（仅对 planDraft 提取的 todo 生效；
           // 原生 checklist（source=checklist）由 bridge 的 todo_update 精确驱动，这里跳过）
           let todos = last.todos
           if (todos && todos.length > 0 && todos[0]?.source !== "checklist") {
-            const workCount = newTimeline.filter((t) => t.kind === "work").length
+            const workCount = newTimeline.filter((t) => t.kind !== "thinking").length
             const active = Math.min(Math.floor(workCount / 2), todos.length - 1)
             todos = todos.map((td, k) => ({
               ...td,
