@@ -997,7 +997,70 @@ def handle_act(agent, prompt: str) -> None:
     execute_act(agent, prompt, with_report=True, require_execution=True)  # 分析执行：强制真实动手
 
 
-def handle_plan(agent, prompt: str) -> None:
+# ---- 多轮 plan（方案 B，对标 Roo "对话即迭代"）----
+# session_id -> {"plan", "round", "goal", "research", "details", "details_text"}
+_pending_plan: dict[str, dict] = {}
+
+_PLAN_INTENT_SYSTEM = (
+    "判断用户对一份已生成研究计划的反馈意图。\n"
+    "- 如果用户表达「同意/满意/开始执行/开始实施/就按这个来/OK/好/执行吧/可以」等"
+    "明确同意并要开始实施 → 输出 execute\n"
+    "- 如果用户对计划提要求/修改意见/补充/质疑/换方法/增加步骤等"
+    "（即使提到'执行/实施'，只要是提出修改意见）→ 输出 refine\n"
+    "只输出一个词：execute 或 refine"
+)
+
+
+def _classify_plan_intent(prompt: str, plan: str) -> str:
+    """LLM 判断用户对计划的反馈意图：execute（同意执行）或 refine（提要求精进）。"""
+    try:
+        t = _llm_text(_PLAN_INTENT_SYSTEM, f"计划摘要:\n{plan[:1200]}\n\n用户消息:\n{prompt[:800]}").strip().lower()
+        return "execute" if "execute" in t else "refine"
+    except Exception:
+        return "refine"  # 判断失败默认精进（安全，不会误执行）
+
+
+_PLAN_REFINE_SYSTEM = (
+    "你是一位资深生物信息学方法学专家。用户对一份已生成的研究计划提出了修改要求，"
+    "请基于原计划 + 用户反馈 + 调研信息，精进并重新生成完整的研究计划（Markdown）。\n"
+    "保持原有栏目结构，并把用户的修改要求落实进对应部分。\n"
+    "结构: 研究目标 / 数据与方法 / 分析步骤（编号列表）/ 预期结果 / 风险评估 / 算力评估与耗时预估。"
+)
+
+
+def refine_plan(pending: dict, feedback: str) -> str:
+    """基于原计划 + 用户反馈生成新版计划（多轮 plan 的核心）。"""
+    user = (
+        f"研究目标: {pending.get('goal', '')}\n\n"
+        f"前期调研结果:\n{(pending.get('research') or '')[:4000]}\n\n"
+        f"用户澄清信息:\n{pending.get('details_text') or '无'}\n\n"
+        f"{_env_resources_summary()}\n\n"
+        f"当前计划（第 {pending.get('round', 1)} 版）:\n{pending.get('plan', '')}\n\n"
+        f"用户新的修改要求:\n{feedback}\n\n"
+        f"请精进计划（这是第 {pending.get('round', 1) + 1} 版）。"
+    )
+    return _llm_text(_PLAN_REFINE_SYSTEM, user)
+
+
+def handle_plan_feedback(agent, prompt: str, pending: dict, session_id: str) -> None:
+    """方案 B：pending 计划存在时，用户输入框消息 = 反馈（精进）或执行（同意）。"""
+    intent = _classify_plan_intent(prompt, pending["plan"])
+    print(f"[biomni-bridge] plan intent={intent}", file=sys.stderr)
+    if intent == "execute":
+        plan = pending["plan"]
+        _pending_plan.pop(session_id, None)
+        send({"type": "status", "text": "已确认计划，开始执行..."})
+        execute_act(agent, plan, with_report=True, fresh_task=True, require_execution=True)
+    else:
+        send({"type": "status", "text": "正在根据你的要求精进计划..."})
+        new_plan = refine_plan(pending, prompt)
+        pending["plan"] = new_plan
+        pending["round"] += 1
+        send({"type": "plan_draft", "content": new_plan, "round": pending["round"]})
+        send({"type": "status", "text": f"已生成第 {pending['round']} 版计划，可继续提要求或确认执行"})
+
+
+def handle_plan(agent, prompt: str, session_id: str | None = None) -> None:
     """Plan 模式：先判断任务类型。
     - research（调研/咨询类）：直接调研输出，不做完整计划
     - analysis（分析型）：前期调研 → 澄清 → 计划 → 确认 → 执行
@@ -1062,20 +1125,19 @@ def handle_plan(agent, prompt: str) -> None:
     # 3. 生成可编辑计划（带调研+澄清信息）
     send({"type": "status", "text": "正在生成研究计划..."})
     plan = generate_plan(prompt, details, research)
-    send({"type": "plan_draft", "content": plan})
+    send({"type": "plan_draft", "content": plan, "round": 1})
 
-    # 4. 等待确认 / 编辑 / 取消
-    msg = read_next_message()
-    if not msg:
-        return
-    if msg.get("type") == "cancel":
-        send({"type": "status", "text": "已取消"})
-        return
-    if msg.get("type") == "plan_edit" and msg.get("content"):
-        plan = msg["content"]
-
-    # 5. 确认 → 执行（前端创建新的 Act 执行卡片；分析执行强制真实动手）
-    execute_act(agent, plan, with_report=True, fresh_task=True, require_execution=True)
+    # 4. 挂起（方案 B 多轮 plan）：把计划存入 pending，等待用户反馈/确认。
+    #    用户可在输入框直接发消息提要求 → bridge 判断精进(plan_refine)或执行(execute)
+    _pending_plan[session_id or ""] = {
+        "plan": plan,
+        "round": 1,
+        "goal": prompt,
+        "research": research,
+        "details": details,
+        "details_text": "\n".join(f"- {d.get('q','')}: {d.get('answer','')}" for d in details),
+    }
+    send({"type": "status", "text": "计划已生成：可直接对计划提要求精进，或点「确认计划」执行"})
 
 
 def main() -> None:
@@ -1114,6 +1176,7 @@ def main() -> None:
             elif req_type == "new_conversation":
                 # 显式清空会话记忆（带 session_id 清该会话；不带清全部，兼容旧前端）
                 _clear_thread(req.get("session_id"))
+                _pending_plan.pop(req.get("session_id") or "", None)  # 清多轮 plan 状态
                 print("[biomni-bridge] new conversation (memory cleared)", file=sys.stderr)
             elif req_type == "generate_title":
                 title = generate_title(req.get("prompt", ""))
@@ -1135,7 +1198,29 @@ def main() -> None:
                 if mode == "act":
                     handle_act(agent, prompt)
                 else:
-                    handle_plan(agent, prompt)
+                    # 方案 B 多轮 plan：该会话有待确认计划 → 用户输入视为反馈/执行
+                    _sid = req.get("session_id") or ""
+                    pending = _pending_plan.get(_sid)
+                    if pending:
+                        handle_plan_feedback(agent, prompt, pending, _sid)
+                    else:
+                        handle_plan(agent, prompt, req.get("session_id"))
+            elif req_type == "plan_confirm":
+                # 用户点「确认计划」→ 执行当前待确认计划
+                _sid = req.get("session_id") or ""
+                pending = _pending_plan.get(_sid)
+                if pending:
+                    plan = pending["plan"]
+                    _pending_plan.pop(_sid, None)
+                    send({"type": "status", "text": "已确认计划，开始执行..."})
+                    execute_act(agent, plan, with_report=True, fresh_task=True, require_execution=True)
+            elif req_type == "plan_edit":
+                # 用户手动编辑计划 → 更新 pending 的计划内容
+                _sid = req.get("session_id") or ""
+                content = req.get("content") or ""
+                if _pending_plan.get(_sid) and content:
+                    _pending_plan[_sid]["plan"] = content
+                    send({"type": "status", "text": "计划已编辑（可继续提要求或确认执行）"})
         except Exception as e:  # noqa: BLE001
             send({"type": "error", "message": str(e)})
 

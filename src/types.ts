@@ -74,6 +74,7 @@ export interface ExtToWebview {
   options?: string[] // clarification_question 选项列表
   option_details?: OptionDetail[] // clarification_question 选项详情（利弊/推荐）
   content?: string // plan_draft / report / reasoning 内容
+  round?: number // plan_draft 计划版本（多轮 plan 第 N 版）
   files?: string[] // mention_files 工作区文件列表（相对路径）
   items?: TodoItem[] | DeliverableItem[] // todo_update 动态 todo / deliverables 交付物
   dir?: string // deliverables 交付物根目录（绝对路径）

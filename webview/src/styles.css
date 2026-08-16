@@ -1280,6 +1280,17 @@ body {
   font-size: 10.5px;
 }
 
+.plan-hint {
+  margin: 4px 0 6px;
+  font-size: 11px;
+  opacity: 0.85;
+  color: var(--vscode-descriptionForeground, #999);
+  background: color-mix(in srgb, var(--vscode-charts-blue, #61afef) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-charts-blue, #61afef) 18%, transparent);
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
 .timeline-body {
   flex-basis: 100%;
   max-height: 340px;

@@ -23,6 +23,7 @@ interface ChatMessage {
   finishedAt?: number // 任务结束时间（结束后耗时停止）
   clarifications?: ClarificationItem[] // 澄清选择题（待答/已答）
   planDraft?: string // 待确认的研究计划
+  planRound?: number // 计划版本（多轮 plan 第 N 版）
   planEditing?: boolean // 计划是否处于编辑态
   planConfirmed?: boolean // 计划是否已确认
   report?: string // 执行报告
@@ -181,6 +182,9 @@ export default function App() {
 
   const currentSession = sessions.find((s) => s.id === currentSessionId)
 
+  // 多轮 plan：是否存在待确认的研究计划（用于输入框提示）
+  const lastPendingPlan = [...messages].reverse().find((mm) => mm.planDraft && !mm.planConfirmed)?.planDraft
+
   // 把当前 messages 写回 sessions（切换/新建前调用）
   const saveCurrentSession = () => {
     setSessions((prev) =>
@@ -321,9 +325,12 @@ export default function App() {
         patchLast((last) => ({
           ...last,
           planDraft: String(msg.content ?? ""),
+          planRound: msg.round,
           planEditing: false,
           planConfirmed: false,
         }))
+        // 多轮 plan：计划回来后释放 busy，用户可继续提要求或确认执行
+        setBusy(false)
       } else if (msg.type === "report") {
         patchLast((last) => ({ ...last, report: String(msg.content ?? ""), reportExpanded: false }))
       } else if (msg.type === "todo_update") {
@@ -619,9 +626,9 @@ export default function App() {
     const m = messages[index]
     if (!m) return
     if (m.planEditing) {
-      vscode.postMessage({ type: "plan_edit", content: draft })
+      vscode.postMessage({ type: "plan_edit", content: draft, sessionId: currentSessionId })
     } else {
-      vscode.postMessage({ type: "plan_confirm" })
+      vscode.postMessage({ type: "plan_confirm", sessionId: currentSessionId })
     }
     patchLastAt(index, (last) => ({
       ...last,
@@ -911,13 +918,18 @@ export default function App() {
               </div>
             )}
 
-            {/* ===== 可编辑计划卡片（Plan 模式） ===== */}
+            {/* ===== 可编辑计划卡片（Plan 模式，多轮可精进） ===== */}
             {m.role === "assistant" && m.planDraft && (
               <div className="plan-card">
                 <div className="plan-header">
-                  <span>研究计划</span>
+                  <span>研究计划{m.planRound && m.planRound > 1 ? `（第 ${m.planRound} 版）` : ""}</span>
                   <span className="plan-badge">{m.planConfirmed ? "已确认" : "待确认"}</span>
                 </div>
+                {!m.planConfirmed && !m.planEditing && (
+                  <div className="plan-hint">
+                    💡 可在下方输入框直接对计划提要求，我将生成新版计划；或点「确认计划」执行
+                  </div>
+                )}
                 {m.planEditing ? (
                   <textarea
                     className="plan-textarea"
@@ -1100,7 +1112,11 @@ export default function App() {
               el.style.height = "auto"
               el.style.height = Math.min(el.scrollHeight, 160) + "px"
             }}
-            placeholder={`Ask Biomni... (${mode === "plan" ? "研究方案" : "完整任务"})  @引用文件 · Enter发送 · Shift+Enter换行`}
+            placeholder={
+              mode === "plan" && lastPendingPlan
+                ? "对当前计划提要求（发送消息即可精进），或点「确认计划」执行..."
+                : `Ask Biomni... (${mode === "plan" ? "研究方案" : "完整任务"})  @引用文件 · Enter发送 · Shift+Enter换行`
+            }
             disabled={busy}
             rows={1}
           />
