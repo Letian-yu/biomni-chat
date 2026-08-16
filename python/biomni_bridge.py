@@ -232,7 +232,12 @@ _CLARIFY_SYSTEM = (
 _PLAN_SYSTEM = (
     "你是一位资深生物信息学方法学专家。基于前期调研结果与用户澄清信息，"
     "生成一份详细、可执行的研究计划（Markdown）。\n"
-    "结构: 研究目标 / 数据与方法 / 分析步骤（编号列表）/ 预期结果 / 风险评估 / 时间安排。"
+    "结构: 研究目标 / 数据与方法 / 分析步骤（编号列表）/ 预期结果 / 风险评估 / 算力评估与耗时预估。\n"
+    "「算力评估与耗时预估」栏目必须基于下方【服务器资源快照】真实评估，包含：\n"
+    "  ① 数据规模（样本/细胞/基因数、数据量）\n"
+    "  ② 计算复杂度（各步骤轻/中/重）\n"
+    "  ③ 资源需求（内存/CPU/GPU/磁盘，结合服务器资源判断是否满足）\n"
+    "  ④ 预计总耗时（分钟/小时，按步骤拆解）"
 )
 
 _REPORT_SYSTEM = (
@@ -265,13 +270,78 @@ def generate_question(goal: str, details: list, research: str = "") -> dict:
     return _llm_json(_CLARIFY_SYSTEM, user)
 
 
+def _detect_gpu() -> str:
+    """检测 GPU（nvidia-smi）。"""
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            return ", ".join(n.strip() for n in r.stdout.strip().splitlines()[:2])
+    except Exception:
+        pass
+    return ""
+
+
+def _mem_gb() -> int:
+    """系统内存 GB。"""
+    try:
+        import psutil
+        return int(psutil.virtual_memory().total / 1024**3)
+    except Exception:
+        pass
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal"):
+                    return int(line.split()[1]) // 1024 // 1024
+    except Exception:
+        pass
+    return 0
+
+
+def _disk_free_gb(path: str) -> int:
+    try:
+        st = os.statvfs(path)
+        return int(st.f_bavail * st.f_frsize / 1024**3)
+    except Exception:
+        return 0
+
+
+def _env_resources_summary() -> str:
+    """服务器资源快照（供 A1 算力评估，真实而非空谈）。"""
+    cpu = os.cpu_count() or 0
+    gpu = _detect_gpu()
+    mem = _mem_gb()
+    disk = _disk_free_gb(_BIOMNI_DIR)
+    gpu_s = f"GPU: {gpu}" if gpu else "GPU: 无"
+    return (
+        f"【服务器资源快照】CPU {cpu} 核；内存约 {mem} GB；{gpu_s}；"
+        f"磁盘剩余约 {disk} GB。请基于此评估每一步的算力与耗时是否可行。"
+    )
+
+
+def _fmt_duration(sec: float) -> str:
+    s = int(max(0, sec))
+    if s < 60:
+        return f"{s}s"
+    m = s // 60
+    if m < 60:
+        return f"{m}m {s % 60}s"
+    return f"{m // 60}h {m % 60}m"
+
+
 def generate_plan(goal: str, details: list, research: str = "") -> str:
     detail_text = "\n".join(f"- {d.get('q','')}: {d.get('answer','')}" for d in details)
     user = (
         f"研究目标: {goal}\n\n"
         f"前期调研结果:\n{(research[:4000] if research else '(无)')}\n\n"
         f"用户澄清信息:\n{detail_text or '(无)'}\n\n"
-        f"请结合调研与澄清生成研究计划。"
+        f"{_env_resources_summary()}\n\n"
+        f"请结合调研、澄清与服务器资源，生成研究计划。"
     )
     return _llm_text(_PLAN_SYSTEM, user)
 
@@ -616,8 +686,8 @@ def _pip_key_versions() -> list[str]:
         return []
 
 
-def _write_methodology(task_dir: str, task: str, deliverables: list[dict]) -> None:
-    """A3: 生成 METHODOLOGY.md（数据来源/执行轨迹/包版本/交付物）。"""
+def _write_methodology(task_dir: str, task: str, deliverables: list[dict], elapsed_sec: float | None = None) -> None:
+    """A3: 生成 METHODOLOGY.md（数据来源/执行轨迹/包版本/交付物/实际耗时）。"""
     try:
         lines = [
             "# 分析方法学（Methodology）",
@@ -625,6 +695,8 @@ def _write_methodology(task_dir: str, task: str, deliverables: list[dict]) -> No
             f"- 任务: {task[:200]}",
             f"- 时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         ]
+        if elapsed_sec is not None:
+            lines.append(f"- 实际总耗时: {_fmt_duration(elapsed_sec)}")
         log_path = os.path.join(task_dir, "execution_log.md")
         if os.path.exists(log_path):
             log_text = open(log_path, encoding="utf-8").read()
@@ -829,6 +901,7 @@ def execute_act(agent, task: str, with_report: bool, fresh_task: bool = False, r
     """
     send({"type": "act_start", "fresh": fresh_task, "mode": "act"})
     send({"type": "status", "text": "Act 模式执行中..."})
+    _exec_t0 = time.time()  # 记录执行开始时间（② 预估 vs 实际耗时对照）
     # 执行阶段：确保关闭调研模式，允许下载数据与运行主分析
     agent.research_only_mode = False
     # 交付物目录：本次执行独立子目录（隔离 + 便于扫描本次新增）
@@ -861,8 +934,8 @@ def execute_act(agent, task: str, with_report: bool, fresh_task: bool = False, r
     send_result_streaming(final)
     # 扫描本次真实交付物（区别于 A1 口头声称），连同绝对路径发给前端
     deliverables = scan_deliverables(task_dir)
-    # 生成 METHODOLOGY.md（方法学透明性 A3：数据来源/轨迹/包版本/交付物）
-    _write_methodology(task_dir, task, deliverables)
+    # 生成 METHODOLOGY.md（方法学透明性 A3：数据来源/轨迹/包版本/交付物/实际耗时）
+    _write_methodology(task_dir, task, deliverables, elapsed_sec=time.time() - _exec_t0)
     deliverables = scan_deliverables(task_dir)  # METHODOLOGY 加入后重新扫描
     if deliverables:
         send({"type": "deliverables", "dir": task_dir, "items": deliverables})
