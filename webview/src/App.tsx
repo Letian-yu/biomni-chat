@@ -24,6 +24,7 @@ interface ChatMessage {
   clarifications?: ClarificationItem[] // 澄清选择题（待答/已答）
   planDraft?: string // 待确认的研究计划
   planRound?: number // 计划版本（多轮 plan 第 N 版）
+  planStale?: boolean // 计划是否已被新版替代（多轮 plan 唯一可确认）
   planEditing?: boolean // 计划是否处于编辑态
   planConfirmed?: boolean // 计划是否已确认
   report?: string // 执行报告
@@ -322,10 +323,17 @@ export default function App() {
           return { ...last, clarifications: [...existing, item] }
         })
       } else if (msg.type === "plan_draft") {
+        // 新计划到达：之前所有未确认的计划标记为「已替代」（多轮 plan 唯一可确认）
+        setMessages((prev) =>
+          prev.map((mm) =>
+            mm.planDraft && !mm.planConfirmed ? { ...mm, planStale: true } : mm,
+          ),
+        )
         patchLast((last) => ({
           ...last,
           planDraft: String(msg.content ?? ""),
           planRound: msg.round,
+          planStale: false,
           planEditing: false,
           planConfirmed: false,
         }))
@@ -489,7 +497,7 @@ export default function App() {
   }
 
   // 统一重发：msgs 为截断后的历史（不含新 user），prompt 为新请求（对齐 Roo submitEditedMessage/retry）
-  const resendFrom = (msgs: ChatMessage[], prompt: string) => {
+  const resendFrom = (msgs: ChatMessage[], prompt: string, sendMode?: Mode) => {
     const history = msgs
       .map((mm) => ({ role: mm.role, content: mm.content || mm.taskStatus || "" }))
       .filter((h) => h.content.trim())
@@ -626,18 +634,15 @@ export default function App() {
     const m = messages[index]
     if (!m) return
     if (m.planEditing) {
+      // 编辑态：把编辑后的计划提交给 bridge（更新 pending），退出编辑态
       vscode.postMessage({ type: "plan_edit", content: draft, sessionId: currentSessionId })
-    } else {
-      vscode.postMessage({ type: "plan_confirm", sessionId: currentSessionId })
+      patchLastAt(index, (last) => ({ ...last, planEditing: false }))
+      return
     }
-    patchLastAt(index, (last) => ({
-      ...last,
-      planEditing: false,
-      planConfirmed: true,
-      finishedAt: Date.now(), // 计划阶段结束，plan 卡片耗时停止
-    }))
-    // 对齐 Roo switch_mode：确认计划后自动切换到 Act 模式执行
-    setMode("act")
+    // 确认 = 标记已确认 + 自动发送「开始实施」→ 走 plan 反馈流程执行（用户可见）
+    patchLastAt(index, (last) => ({ ...last, planConfirmed: true, finishedAt: Date.now() }))
+    setMode("act") // 对齐 Roo switch_mode：确认后自动切换到 Act 模式
+    resendFrom(messages, "开始实施", "plan")
   }
 
   const togglePlanEdit = (index: number) => {
@@ -923,9 +928,11 @@ export default function App() {
               <div className="plan-card">
                 <div className="plan-header">
                   <span>研究计划{m.planRound && m.planRound > 1 ? `（第 ${m.planRound} 版）` : ""}</span>
-                  <span className="plan-badge">{m.planConfirmed ? "已确认" : "待确认"}</span>
+                  <span className="plan-badge">
+                    {m.planConfirmed ? "已确认" : m.planStale ? "已替代" : "待确认"}
+                  </span>
                 </div>
-                {!m.planConfirmed && !m.planEditing && (
+                {!m.planConfirmed && !m.planStale && !m.planEditing && (
                   <div className="plan-hint">
                     💡 可在下方输入框直接对计划提要求，我将生成新版计划；或点「确认计划」执行
                   </div>
@@ -944,22 +951,26 @@ export default function App() {
                   </div>
                 )}
                 <div className="plan-actions">
-                  {!m.planEditing ? (
-                    <>
-                      <button className="plan-btn primary" onClick={() => confirmPlan(i, m.planDraft!)}>
-                        ✓ 确认计划
-                      </button>
-                      <button className="plan-btn" onClick={() => togglePlanEdit(i)}>
-                        编辑
-                      </button>
-                    </>
-                  ) : (
+                  {m.planConfirmed ? (
+                    <span className="plan-status-label confirmed">✓ 已确认</span>
+                  ) : m.planStale ? (
+                    <span className="plan-status-label stale">⏳ 已由后续版本替代</span>
+                  ) : m.planEditing ? (
                     <>
                       <button className="plan-btn primary" onClick={() => confirmPlan(i, m.planDraft!)}>
                         ✓ 确认修改并执行
                       </button>
                       <button className="plan-btn" onClick={() => togglePlanEdit(i)}>
                         取消编辑
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="plan-btn primary" onClick={() => confirmPlan(i, m.planDraft!)}>
+                        ✓ 确认计划
+                      </button>
+                      <button className="plan-btn" onClick={() => togglePlanEdit(i)}>
+                        编辑
                       </button>
                     </>
                   )}
