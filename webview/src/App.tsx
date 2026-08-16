@@ -339,6 +339,13 @@ export default function App() {
         }))
         // 多轮 plan：计划回来后释放 busy，用户可继续提要求或确认执行
         setBusy(false)
+      } else if (msg.type === "plan_explain") {
+        // 提问解答：写入当前 assistant 占位消息；计划未变（未发新 plan_draft）→ 上一条计划确认按钮保留
+        const ans = String(msg.content ?? "").trim()
+        if (ans) {
+          patchLast((last) => ({ ...last, content: (last.content || "") + ans }))
+          setBusy(false)
+        }
       } else if (msg.type === "report") {
         patchLast((last) => ({ ...last, report: String(msg.content ?? ""), reportExpanded: false }))
       } else if (msg.type === "todo_update") {
@@ -934,7 +941,7 @@ export default function App() {
                 </div>
                 {!m.planConfirmed && !m.planStale && !m.planEditing && (
                   <div className="plan-hint">
-                    💡 可在下方输入框直接对计划提要求，我将生成新版计划；或点「确认计划」执行
+                    💡 可直接对计划提问（我会解答，计划不变）、提要求（生成新版计划），或点「确认计划」执行
                   </div>
                 )}
                 {m.planEditing ? (

@@ -1002,22 +1002,46 @@ def handle_act(agent, prompt: str) -> None:
 _pending_plan: dict[str, dict] = {}
 
 _PLAN_INTENT_SYSTEM = (
-    "判断用户对一份已生成研究计划的反馈意图。\n"
-    "- 如果用户表达「同意/满意/开始执行/开始实施/就按这个来/OK/好/执行吧/可以」等"
-    "明确同意并要开始实施 → 输出 execute\n"
-    "- 如果用户对计划提要求/修改意见/补充/质疑/换方法/增加步骤等"
-    "（即使提到'执行/实施'，只要是提出修改意见）→ 输出 refine\n"
-    "只输出一个词：execute 或 refine"
+    "判断用户对一份已生成研究计划的反馈意图，只输出一个词：execute、ask 或 refine\n"
+    "- execute: 用户明确同意并要开始实施（开始执行/开始实施/就按这个来/OK/好/可以/执行吧/同意）\n"
+    "- refine: 用户用祈使句对计划提出明确的修改要求（请/换成/改用/改为/加上/删掉/去掉/替换/把X改成Y/增加步骤）\n"
+    "- ask: 用户提问/咨询/表达疑惑/询问原因或备选方案区别/混合口吻难以判定"
+    "（先解答，不修改计划，等用户理解后再决定是否精进）\n"
+    "边界模糊时优先 ask。"
+)
+
+
+# 疑问/咨询词：命中 → ask（先解答，用户理解后指导 refine 质量更高；且 ask 不改动计划状态）
+# 注意: 不含"差异"——它是生信高频词（差异分析），误伤会导致修改命令被判成 ask
+_QUESTION_RE = re.compile(
+    r"(为什么|为何|哪个|哪种|区别|对比|能不能|可否|可不可以|可以吗|行不行|"
+    r"怎么|如何|是什么|解释一下|说明一下|不清楚|不懂|不理解|有疑问|合适吗|对吗)"
+)
+# 强命令式祈使：命中 → refine（明确的修改要求，不被解释吞掉）
+_IMPERATIVE_RE = re.compile(
+    r"(请.{0,6}(换|改|用|加|删|去掉|替换|采用|增加|加入|重做|调整)|帮我.{0,4}(换|改|用|加|删)|换成|改用|改为|加上|删掉|去掉|替换|采纳|就用|增加.{0,4}(步|环|分析|方法)|把.{0,20}(改|换)成)"
 )
 
 
 def _classify_plan_intent(prompt: str, plan: str) -> str:
-    """LLM 判断用户对计划的反馈意图：execute（同意执行）或 refine（提要求精进）。"""
+    """判断用户对计划的反馈意图：execute（同意执行）/ ask（提问咨询）/ refine（明确要求修改）。
+    分层：疑问→ask，强命令式→refine，其余交 LLM 三分类，fallback→ask（无损，不误执行不覆盖计划）。"""
+    # 1) 疑问/咨询口吻 → ask（含混合口吻，先解答）
+    if _QUESTION_RE.search(prompt):
+        return "ask"
+    # 2) 无疑问词的强命令式祈使 → refine
+    if _IMPERATIVE_RE.search(prompt):
+        return "refine"
+    # 3) LLM 三分类
     try:
         t = _llm_text(_PLAN_INTENT_SYSTEM, f"计划摘要:\n{plan[:1200]}\n\n用户消息:\n{prompt[:800]}").strip().lower()
-        return "execute" if "execute" in t else "refine"
+        if "execute" in t:
+            return "execute"
+        if "refine" in t:
+            return "refine"
+        return "ask"
     except Exception:
-        return "refine"  # 判断失败默认精进（安全，不会误执行）
+        return "ask"  # 判断失败 → ask（无损操作，不会误执行或覆盖计划）
 
 
 _PLAN_REFINE_SYSTEM = (
@@ -1042,6 +1066,28 @@ def refine_plan(pending: dict, feedback: str) -> str:
     return _llm_text(_PLAN_REFINE_SYSTEM, user)
 
 
+_PLAN_EXPLAIN_SYSTEM = (
+    "你是一位资深生物信息学方法学专家，负责解答用户对已生成研究计划的疑问。\n"
+    "规则:\n"
+    "- 只解答用户的疑问，不修改、不重写计划本身。\n"
+    "- 引用当前计划中的具体步骤/方法/选择来解释原因，不要泛泛而谈。\n"
+    "- 若用户问及备选方案，客观说明各方案的适用场景与当前计划选择它的理由，不下绝对断言。\n"
+    "- 回答最后必须原样输出引导句：\n"
+    "  「如果你希望我按此调整计划，回复『按此修改』即可；也可以继续提问，或点『确认计划』开始执行。」\n"
+    "结构: 先直接回答问题（简短），再视需要补充背景，最后输出引导句。"
+)
+
+
+def explain_plan(pending: dict, question: str) -> str:
+    """解答用户对当前计划的疑问（不修改计划 → 保留确认按钮与决策状态）。"""
+    user = (
+        f"研究目标: {pending.get('goal', '')}\n\n"
+        f"当前计划（第 {pending.get('round', 1)} 版）:\n{pending.get('plan', '')}\n\n"
+        f"用户的疑问:\n{question}"
+    )
+    return _llm_text(_PLAN_EXPLAIN_SYSTEM, user)
+
+
 def handle_plan_feedback(agent, prompt: str, pending: dict, session_id: str) -> None:
     """方案 B：pending 计划存在时，用户输入框消息 = 反馈（精进）或执行（同意）。"""
     intent = _classify_plan_intent(prompt, pending["plan"])
@@ -1051,6 +1097,16 @@ def handle_plan_feedback(agent, prompt: str, pending: dict, session_id: str) -> 
         _pending_plan.pop(session_id, None)
         send({"type": "status", "text": "已确认计划，开始执行..."})
         execute_act(agent, plan, with_report=True, fresh_task=True, require_execution=True)
+    elif intent == "ask":
+        # 提问/咨询：只解答不修改计划（不更新 pending、不发新 plan_draft → 前端确认按钮保留）
+        send({"type": "status", "text": "正在解答你的疑问（计划不变，仍可确认或精进）..."})
+        try:
+            answer = explain_plan(pending, prompt)
+        except Exception as e:  # noqa: BLE001
+            send({"type": "status", "text": f"暂时无法解答（{e}），可直接提修改要求精进或点「确认计划」执行"})
+            return
+        send({"type": "plan_explain", "content": answer, "round": pending["round"]})
+        send({"type": "status", "text": "已解答：可继续提问、提修改要求精进，或点「确认计划」执行"})
     else:
         send({"type": "status", "text": "正在根据你的要求精进计划..."})
         new_plan = refine_plan(pending, prompt)
