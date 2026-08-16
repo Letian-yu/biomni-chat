@@ -545,7 +545,107 @@ def summarize_observation(obs: str) -> str:
         return ""
 
 
-def stream_agent(agent, task: str, max_rounds: int = 3, require_execution: bool = False) -> str:
+# ---- 方法学透明性辅助（A1 脚本落盘 / A2 执行日志 / A3 METHODOLOGY）----
+
+def _detect_lang(code: str) -> str:
+    """根据 <execute> 内容判断语言。"""
+    first = code.lstrip()
+    if first.startswith("#!R") or first.startswith("# R code") or first.startswith("# R script"):
+        return "R"
+    if first.startswith("#!BASH") or first.startswith("# Bash") or first.startswith("#!CLI"):
+        return "BASH"
+    return "PY"
+
+
+def _safe_tag(desc: str) -> str:
+    """把描述转成安全文件名片段（保留字母数字/中文，去特殊字符）。"""
+    if not desc:
+        return ""
+    keep: list[str] = []
+    for ch in desc:
+        if ch.isalnum():
+            keep.append(ch)
+        elif keep and keep[-1] != "_":
+            keep.append("_")
+        if len(keep) >= 12:
+            break
+    return "".join(keep).strip("_") or ""
+
+
+def _write_script(task_dir: str, seq: int, desc: str, code: str):
+    """把一段 <execute> 代码落盘为脚本文件（方法学透明性 A1）。返回 (新seq, 相对路径或None)。"""
+    try:
+        lang = _detect_lang(code)
+        ext = {"R": "R", "BASH": "sh", "PY": "py"}[lang]
+        tag = _safe_tag(desc) or f"step{seq:02d}"
+        name = f"step{seq:02d}_{tag}.{ext}"
+        seq += 1
+        scripts_dir = os.path.join(task_dir, "scripts")
+        os.makedirs(scripts_dir, exist_ok=True)
+        header = f"# ---- {desc or '分析步骤'} ----\n# 由 Biomni Chat 自动落盘（方法学透明性）\n\n"
+        with open(os.path.join(scripts_dir, name), "w", encoding="utf-8") as f:
+            f.write(header + code + "\n")
+        return seq, f"scripts/{name}"
+    except Exception as e:
+        log_line("脚本落盘失败:", e)
+        return seq, None
+
+
+def _flush_exec_log(task_dir: str | None, exec_log: list[str]) -> None:
+    """把执行轨迹写入 task_dir/execution_log.md（A2）。"""
+    if not task_dir or not exec_log:
+        return
+    try:
+        os.makedirs(task_dir, exist_ok=True)
+        with open(os.path.join(task_dir, "execution_log.md"), "w", encoding="utf-8") as f:
+            f.write("# 分析执行日志\n\n" + "\n".join(exec_log) + "\n")
+    except Exception as e:
+        log_line("execution_log 写入失败:", e)
+
+
+def _pip_key_versions() -> list[str]:
+    """获取关键包版本（A3，用于 METHODOLOGY）。"""
+    import subprocess
+
+    keys = ["scanpy", "anndata", "pandas", "numpy", "scipy", "leidenalg", "umap", "matplotlib", "seaborn", "rpy2", "biomni"]
+    try:
+        r = subprocess.run([sys.executable, "-m", "pip", "freeze"], capture_output=True, text=True, timeout=25)
+        lines = r.stdout.splitlines()
+        return [ln for ln in lines if any(ln.lower().startswith(k) for k in keys)]
+    except Exception:
+        return []
+
+
+def _write_methodology(task_dir: str, task: str, deliverables: list[dict]) -> None:
+    """A3: 生成 METHODOLOGY.md（数据来源/执行轨迹/包版本/交付物）。"""
+    try:
+        lines = [
+            "# 分析方法学（Methodology）",
+            "",
+            f"- 任务: {task[:200]}",
+            f"- 时间: {time.strftime('%Y-%m-%d %H:%M:%S')}",
+        ]
+        log_path = os.path.join(task_dir, "execution_log.md")
+        if os.path.exists(log_path):
+            log_text = open(log_path, encoding="utf-8").read()
+            gses = sorted(set(re.findall(r"GSE\d+", log_text)))
+            if gses:
+                lines += ["", "## 数据来源", ""] + [f"- {g}" for g in gses]
+            lines += ["", "## 执行轨迹", "", "```", log_text, "```"]
+        pkg_ver = _pip_key_versions()
+        if pkg_ver:
+            lines += ["", "## 关键包版本", "", "```"] + pkg_ver + ["```"]
+        if deliverables:
+            lines += ["", "## 交付物"]
+            for d in deliverables:
+                lines.append(f"- `{d['name']}` ({d['size']} B)")
+        with open(os.path.join(task_dir, "METHODOLOGY.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception as e:
+        log_line("METHODOLOGY 生成失败:", e)
+
+
+def stream_agent(agent, task: str, max_rounds: int = 3, require_execution: bool = False, task_dir: str | None = None) -> str:
     """驱动 A1 go_stream，检测"提前收尾/假完成"并自动续跑；返回最终答案。
 
     - 支持 cancel（返回空串表示已取消）
@@ -555,11 +655,15 @@ def stream_agent(agent, task: str, max_rounds: int = 3, require_execution: bool 
     - 原生 checklist 提取 + bridge 驱动动态 todo（对齐 Roo TodoList）：
       * 从 Ai 消息提取 A1 原生 checklist → 初始化 todo 列表（首个激活）
       * DeepSeek 从不更新 checklist，故由 bridge 按执行动作（observation）数推进状态
+    - task_dir 提供时：自动捕获 A1 的 <execute> 代码落盘为 scripts/，并记录执行日志
+      （方法学透明性 A1/A2，不依赖 A1 自觉保存）
     """
     current = task
     todo_state = None  # {"items": [{id,content,status}], "obs": 执行动作计数}
+    script_seq = 0
+    exec_log: list[str] = []
     log_line("=== stream_agent 开始 require_execution=", require_execution,
-             "| task:", task[:200].replace("\n", " "))
+             "| task_dir=", task_dir, "| task:", task[:200].replace("\n", " "))
     for rnd in range(1, max_rounds + 1):
         executed = False  # 本轮是否真实执行过工具/代码
         if rnd > 1:
@@ -605,12 +709,18 @@ def stream_agent(agent, task: str, max_rounds: int = 3, require_execution: bool 
                     name = tool_m.group(1)
                     # 工具调用：提取关键参数拼成具体说明（如 检索 GSE30691）
                     desc = tool_call_desc(content, name)
+                    exec_log.append(f"- 工具 `{name}` {desc}")
                     send({"type": "status", "text": f"正在调用工具 {desc}"})
                 elif "<execute>" in content:
                     executed = True
                     # 代码执行：用 LLM 概括这段代码在做什么（如 正在运行差异分析）
                     code = extract_execute_code(content)
                     desc = describe_code(code)
+                    # 脚本落盘（方法学透明性 A1）：把真实代码保存为可重跑脚本
+                    if task_dir:
+                        script_seq, script_rel = _write_script(task_dir, script_seq, desc or "code", code)
+                        if script_rel:
+                            exec_log.append(f"- 代码 `{script_rel}` · {desc or '执行代码'}")
                     send({
                         "type": "status",
                         "text": f"正在执行代码 · {desc}" if desc else "正在执行代码...",
@@ -622,12 +732,14 @@ def stream_agent(agent, task: str, max_rounds: int = 3, require_execution: bool 
                     todo_state = advance_todos(todo_state)
                     summary = summarize_observation(obs_m.group(1))
                     if summary:
+                        exec_log.append(f"  ↳ 结果: {summary}")
                         send({"type": "status", "text": f"已完成 · {summary}"})
         finally:
             sys.stdout = _saved
 
         final = final_answer_from_log(agent)
         if not final:
+            _flush_exec_log(task_dir, exec_log)
             return ""
         log_line(f"--- 第 {rnd} 轮结束: executed={executed} final={final[:300]!r} ---")
         # 假完成检测：要求执行但本轮零执行且输出看似完成 → 强制续跑
@@ -644,9 +756,11 @@ def stream_agent(agent, task: str, max_rounds: int = 3, require_execution: bool 
             )
             continue
         if not looks_incomplete(final):
+            _flush_exec_log(task_dir, exec_log)
             return final
         # 提前收尾 -> 用当前输出作为新 prompt 续跑
         current = final + "\n\n请继续完成上述任务中尚未完成的所有步骤，最终给出完整结果。"
+    _flush_exec_log(task_dir, exec_log)
     return final
 
 
@@ -739,7 +853,7 @@ def execute_act(agent, task: str, with_report: bool, fresh_task: bool = False, r
     )
     log_line("=== execute_act 开始 fresh=", fresh_task, "| task_dir=", task_dir,
              "| task:", task[:200].replace("\n", " "))
-    final = stream_agent(agent, execution_prompt, require_execution=require_execution)
+    final = stream_agent(agent, execution_prompt, require_execution=require_execution, task_dir=task_dir)
     if not final:
         send({"type": "done", "result": "[任务未产生有效结果]"})
         return  # 已取消或无结果
@@ -747,6 +861,9 @@ def execute_act(agent, task: str, with_report: bool, fresh_task: bool = False, r
     send_result_streaming(final)
     # 扫描本次真实交付物（区别于 A1 口头声称），连同绝对路径发给前端
     deliverables = scan_deliverables(task_dir)
+    # 生成 METHODOLOGY.md（方法学透明性 A3：数据来源/轨迹/包版本/交付物）
+    _write_methodology(task_dir, task, deliverables)
+    deliverables = scan_deliverables(task_dir)  # METHODOLOGY 加入后重新扫描
     if deliverables:
         send({"type": "deliverables", "dir": task_dir, "items": deliverables})
         log_line(f"=== 交付物 {len(deliverables)} 个: {task_dir}")
