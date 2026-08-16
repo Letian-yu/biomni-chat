@@ -1013,9 +1013,10 @@ _PLAN_INTENT_SYSTEM = (
 
 # 疑问/咨询词：命中 → ask（先解答，用户理解后指导 refine 质量更高；且 ask 不改动计划状态）
 # 注意: 不含"差异"——它是生信高频词（差异分析），误伤会导致修改命令被判成 ask
+# 含"要不要/是否/该不该/会不会/吗/呢"等口语疑问词，覆盖「要不要做X」这类咨询
 _QUESTION_RE = re.compile(
-    r"(为什么|为何|哪个|哪种|区别|对比|能不能|可否|可不可以|可以吗|行不行|"
-    r"怎么|如何|是什么|解释一下|说明一下|不清楚|不懂|不理解|有疑问|合适吗|对吗)"
+    r"(为什么|为何|哪个|哪种|区别|对比|能不能|可否|可不可以|可以吗|行不行|要不要|是否|该不该|需不需要|会不会|是不是|应不应该|"
+    r"怎么|如何|是什么|解释一下|说明一下|不清楚|不懂|不理解|有疑问|合适吗|对吗|吗|呢)"
 )
 # 强命令式祈使：命中 → refine（明确的修改要求，不被解释吞掉）
 _IMPERATIVE_RE = re.compile(
@@ -1240,6 +1241,7 @@ def main() -> None:
                     send({"type": "title", "content": title})
             elif req_type == "chat":
                 prompt = req.get("prompt", "")
+                raw_prompt = prompt  # 原始用户输入（plan 反馈分类/精进用，避免被历史上下文污染）
                 # 仅支持 plan / act 两模式（Ask 已砍掉）；默认 plan
                 mode = req.get("mode", "plan")
                 print(f"[biomni-bridge] chat mode={mode}", file=sys.stderr)
@@ -1258,7 +1260,9 @@ def main() -> None:
                     _sid = req.get("session_id") or ""
                     pending = _pending_plan.get(_sid)
                     if pending:
-                        handle_plan_feedback(agent, prompt, pending, _sid)
+                        # 分类/精进用原始用户原话（不混入历史上下文，否则「开始实施」
+                        # 可能因历史里的疑问词被误判为 ask）
+                        handle_plan_feedback(agent, raw_prompt, pending, _sid)
                     else:
                         handle_plan(agent, prompt, req.get("session_id"))
             elif req_type == "plan_confirm":

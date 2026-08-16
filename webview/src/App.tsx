@@ -354,7 +354,7 @@ export default function App() {
         if (items.length > 0) {
           patchLast((last) => ({
             ...last,
-            todos: items.map((t) => ({
+            todos: items.map((t: { id: string; content: string; status: string }) => ({
               id: t.id,
               text: String(t.content ?? "").slice(0, 120),
               status:
@@ -646,10 +646,13 @@ export default function App() {
       patchLastAt(index, (last) => ({ ...last, planEditing: false }))
       return
     }
-    // 确认 = 标记已确认 + 自动发送「开始实施」→ 走 plan 反馈流程执行（用户可见）
-    patchLastAt(index, (last) => ({ ...last, planConfirmed: true, finishedAt: Date.now() }))
+    // 确认 = 标记已确认 + 自动发送「开始实施」（构造更新后的数组传给 resendFrom，
+    // 避免 resendFrom 用旧 messages 重建列表，覆盖掉刚标记的 planConfirmed）
     setMode("act") // 对齐 Roo switch_mode：确认后自动切换到 Act 模式
-    resendFrom(messages, "开始实施", "plan")
+    const updated = messages.map((mm, k) =>
+      k === index ? { ...mm, planConfirmed: true, finishedAt: Date.now() } : mm,
+    )
+    resendFrom(updated, "开始实施", "plan")
   }
 
   const togglePlanEdit = (index: number) => {
