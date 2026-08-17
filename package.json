@@ -28,7 +28,8 @@
   "main": "./out/extension.js",
   "files": [
     "out/**",
-    "python/**",
+    "python/biomni_bridge.py",
+    "python/patch_a1.py",
     "README.md"
   ],
   "contributes": {
