@@ -230,8 +230,9 @@ _CLARIFY_SYSTEM = (
 )
 
 _PLAN_SYSTEM = (
-    "你是一位资深生物信息学方法学专家。基于前期调研结果与用户澄清信息，"
+    "你是一位资深生物信息学方法学专家。基于前期调研结果、用户澄清信息与【A1 分析上下文】，"
     "生成一份详细、可执行的研究计划（Markdown）。\n"
+    "「分析步骤」必须基于【A1 分析上下文】中真实可用的工具/数据湖/软件库来规划（不可虚构不存在的工具），\n"
     "结构: 研究目标 / 数据与方法 / 分析步骤（编号列表）/ 预期结果 / 风险评估 / 算力评估与耗时预估。\n"
     "「算力评估与耗时预估」栏目必须基于下方【服务器资源快照】真实评估，包含：\n"
     "  ① 数据规模（样本/细胞/基因数、数据量）\n"
@@ -334,14 +335,76 @@ def _fmt_duration(sec: float) -> str:
     return f"{m // 60}h {m % 60}m"
 
 
-def generate_plan(goal: str, details: list, research: str = "") -> str:
+# ============ 方案 Z：A1 决策上下文复刻 ============
+# 让 bridge 规划时看到与 A1 相同的上下文（工具/数据湖/软件库 + 规划指令），
+# 同一模型 + 同上下文 → 等价复刻 A1 的技术路线（不调用 A1、不打补丁）。
+# A1 system_prompt 开头的规划指令（复刻 A1 的规划逻辑）
+_A1_PLAN_INSTRUCTION = (
+    "Given a task, make a plan first. The plan should be a numbered list of steps "
+    "that you will take to solve the task. Be specific and detailed. Format your plan "
+    "as a checklist with empty checkboxes like this: 1. [ ] First step ..."
+)
+
+
+def _a1_context_summary(agent, goal: str, max_len: int = 6000) -> str:
+    """提取 A1 当前任务的决策上下文（工具/数据湖/软件库 + 规划指令），供 bridge 生成计划。
+
+    用 A1 自己的工具检索器按课题选择资源（与 A1 规划时完全相同的上下文）→
+    bridge 与 A1 用同一模型+同上下文规划，等价复刻 A1 的技术路线。
+    失败时退化为全量精简清单。stdout 重定向防止 A1 内部 print 污染协议流。"""
+    lines = []
+    _saved = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        try:
+            sel = agent._prepare_resources_for_retrieval(goal)
+        except Exception:
+            sel = None
+        if sel and sel.get("tools"):
+            tools = sel["tools"][:40]
+            if tools:
+                lines.append("【A1 按本课题选中的可用分析工具】")
+                for t in tools:
+                    if isinstance(t, dict):
+                        name, desc = t.get("name", ""), t.get("description", "")
+                    else:
+                        name, desc = getattr(t, "name", str(t)), getattr(t, "description", "")
+                    lines.append(f"- {name}: {(desc or '')[:120]}")
+            dl = [d if isinstance(d, str) else d.get("name", "") for d in (sel.get("data_lake") or [])][:20]
+            if dl:
+                lines.append("【A1 可用的数据湖数据】")
+                for name in dl:
+                    lines.append(f"- {name}: {agent.data_lake_dict.get(name, '')[:100]}")
+            libs = [l if isinstance(l, str) else l.get("name", "") for l in (sel.get("libraries") or [])][:20]
+            if libs:
+                lines.append("【A1 可用的软件库】")
+                for name in libs:
+                    lines.append(f"- {name}: {agent.library_content_dict.get(name, '')[:100]}")
+        else:
+            # 退化：全量精简（只列名字）
+            lines.append("【A1 可用工具（全量，按模块）】")
+            for mod, apis in list(agent.module2api.items())[:21]:
+                names = [a.get("name", "") for a in apis if isinstance(a, dict)]
+                if names:
+                    lines.append(f"- {mod.split('.')[-1]}: {', '.join(names[:30])}")
+            lines.append("【A1 数据湖（全量）】" + ", ".join(sorted(agent.data_lake_dict.keys()))[:800])
+            lines.append("【A1 软件库（全量）】" + ", ".join(sorted(agent.library_content_dict.keys()))[:800])
+    finally:
+        sys.stdout = _saved
+    lines.append("【A1 规划方式（请参照此规划技术路线）】")
+    lines.append(_A1_PLAN_INSTRUCTION)
+    return "\n".join(lines)[:max_len]
+
+
+def generate_plan(goal: str, details: list, research: str = "", a1_ctx: str = "") -> str:
     detail_text = "\n".join(f"- {d.get('q','')}: {d.get('answer','')}" for d in details)
     user = (
         f"研究目标: {goal}\n\n"
         f"前期调研结果:\n{(research[:4000] if research else '(无)')}\n\n"
         f"用户澄清信息:\n{detail_text or '(无)'}\n\n"
         f"{_env_resources_summary()}\n\n"
-        f"请结合调研、澄清与服务器资源，生成研究计划。"
+        f"A1 分析上下文（技术路线必须基于这些真实可用的工具/数据/库来规划）:\n{a1_ctx or '(无)'}\n\n"
+        f"请结合调研、澄清、服务器资源与 A1 可用上下文，生成研究计划。"
     )
     return _llm_text(_PLAN_SYSTEM, user)
 
@@ -1049,6 +1112,7 @@ _PLAN_REFINE_SYSTEM = (
     "你是一位资深生物信息学方法学专家。用户对一份已生成的研究计划提出了修改要求，"
     "请基于原计划 + 用户反馈 + 调研信息，精进并重新生成完整的研究计划（Markdown）。\n"
     "保持原有栏目结构，并把用户的修改要求落实进对应部分。\n"
+    "「分析步骤」必须基于【A1 分析上下文】中真实可用的工具/数据湖/软件库（不可虚构工具）。\n"
     "结构: 研究目标 / 数据与方法 / 分析步骤（编号列表）/ 预期结果 / 风险评估 / 算力评估与耗时预估。"
 )
 
@@ -1060,6 +1124,7 @@ def refine_plan(pending: dict, feedback: str) -> str:
         f"前期调研结果:\n{(pending.get('research') or '')[:4000]}\n\n"
         f"用户澄清信息:\n{pending.get('details_text') or '无'}\n\n"
         f"{_env_resources_summary()}\n\n"
+        f"A1 分析上下文（技术路线必须基于这些真实可用的工具/数据/库）:\n{(pending.get('a1_ctx') or '无')}\n\n"
         f"当前计划（第 {pending.get('round', 1)} 版）:\n{pending.get('plan', '')}\n\n"
         f"用户新的修改要求:\n{feedback}\n\n"
         f"请精进计划（这是第 {pending.get('round', 1) + 1} 版）。"
@@ -1179,9 +1244,10 @@ def handle_plan(agent, prompt: str, session_id: str | None = None) -> None:
                 "answer": msg.get("answer") or msg.get("option") or "",
             })
 
-    # 3. 生成可编辑计划（带调研+澄清信息）
-    send({"type": "status", "text": "正在生成研究计划..."})
-    plan = generate_plan(prompt, details, research)
+    # 3. 生成可编辑计划（带调研+澄清信息；方案 Z：注入 A1 决策上下文复刻 A1 规划）
+    send({"type": "status", "text": "正在对齐 A1 分析上下文并生成研究计划..."})
+    a1_ctx = _a1_context_summary(agent, prompt)
+    plan = generate_plan(prompt, details, research, a1_ctx)
     send({"type": "plan_draft", "content": plan, "round": 1})
 
     # 4. 挂起（方案 B 多轮 plan）：把计划存入 pending，等待用户反馈/确认。
@@ -1193,6 +1259,7 @@ def handle_plan(agent, prompt: str, session_id: str | None = None) -> None:
         "research": research,
         "details": details,
         "details_text": "\n".join(f"- {d.get('q','')}: {d.get('answer','')}" for d in details),
+        "a1_ctx": a1_ctx,  # 方案 Z：A1 上下文缓存，精进时复用（省一次检索）
     }
     send({"type": "status", "text": "计划已生成：可直接对计划提要求精进，或点「确认计划」执行"})
 
