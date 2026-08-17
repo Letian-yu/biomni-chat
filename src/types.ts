@@ -16,6 +16,7 @@ export interface ByokConfig {
   baseUrl: string
   model: string
   hasKey: boolean
+  apiKey?: string // 设置页回传的原始 key（不回显，仅保存时传递）
 }
 
 export interface MirrorConfig {
@@ -64,7 +65,7 @@ export interface WebviewToExt {
 }
 
 export interface ExtToWebview {
-  type: "status" | "done" | "error" | "ready" | "clarification_question" | "plan_draft" | "report" | "mention_files" | "act_start" | "reasoning" | "stream" | "todo_update" | "deliverables" | "settings_data" | "settings_test_result" | "deploy_result" | "deploy_progress" | "title"
+  type: "status" | "done" | "error" | "ready" | "clarification_question" | "plan_draft" | "report" | "mention_files" | "act_start" | "reasoning" | "stream" | "todo_update" | "deliverables" | "settings_data" | "settings_test_result" | "deploy_result" | "deploy_progress" | "title" | "pong"
   text?: string // status 内容
   result?: string // done 最终结果
   message?: string // error 信息
@@ -88,7 +89,7 @@ export interface ExtToWebview {
 
 // extension <-> python bridge 消息 (JSON lines over stdio)
 export interface BridgeRequest {
-  type: "chat" | "ping" | "cancel" | "clarify_answer" | "plan_confirm" | "plan_edit" | "new_conversation"
+  type: "chat" | "ping" | "cancel" | "clarify_answer" | "plan_confirm" | "plan_edit" | "new_conversation" | "generate_title"
   prompt?: string
   mode?: ChatMode
   session_id?: string

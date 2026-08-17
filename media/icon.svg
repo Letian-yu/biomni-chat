@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- 聊天气泡（Biomni Chat 交流容器） -->
+  <path fill="currentColor" d="M12 3a9 9 0 0 1 8.55 12.35A8.96 8.96 0 0 1 12 21h-.4L8 24v-3.1A9 9 0 0 1 12 3z"/>
+  <!-- DNA 双螺旋：两条主链 -->
+  <path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M8.4 7.5c2.4-1.2 4.8-1.2 7.2 0M8.4 16.5c2.4 1.2 4.8 1.2 7.2 0M8.4 7.5C7 9.4 7 12 8.4 14M15.6 7.5c1.4 1.9 1.4 4.6 0 6.5"/>
+  <!-- DNA 双螺旋：碱基对横档 -->
+  <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" d="M8.9 8l6.2 8M15.1 8L8.9 16"/>
+</svg>

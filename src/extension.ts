@@ -14,13 +14,20 @@ const BIOMNI_DIR = "/data/biomni"
 let currentPanel: vscode.WebviewPanel | null = null
 let currentBridge: BiomniBridge | null = null
 
+// 编辑器面板与侧边栏视图共用的最小宿主接口（两者都具备 webview + onDidDispose）
+type ChatHost = { webview: vscode.Webview; onDidDispose: vscode.Event<unknown> }
+
 export function activate(context: vscode.ExtensionContext): void {
   console.log("[biomni-chat] activated")
 
-  const disposable = vscode.commands.registerCommand("biomniChat.open", () => {
-    openChatPanel(context)
-  })
-  context.subscriptions.push(disposable)
+  // 侧边栏视图：活动栏 Biomni 图标 → 侧边栏聊天（像 Cline/Roo；可拖到右侧辅助侧边栏）
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider("biomniChat.view", new ChatViewProvider(context)),
+  )
+  // 命令：在编辑器 Tab 打开聊天（保留原有入口）
+  context.subscriptions.push(
+    vscode.commands.registerCommand("biomniChat.open", () => openChatPanel(context)),
+  )
 }
 
 export function deactivate(): void {
@@ -90,7 +97,7 @@ function saveMirrors(m: MirrorConfig): void {
   fs.writeFileSync(path.join(os.homedir(), ".Rprofile"), `options(repos = c(CRAN = "${m.cran}"))\n`)
 }
 
-async function readSettings(panel: vscode.WebviewPanel): Promise<void> {
+async function readSettings(panel: ChatHost): Promise<void> {
   let byok: ByokConfig = { provider: "custom", baseUrl: "", model: "", hasKey: false }
   try {
     if (fs.existsSync(ENV_FILE)) {
@@ -120,7 +127,7 @@ function detectRemoteStatus(): { ok: boolean; mode: string } {
   return { ok: isLinuxHost, mode }
 }
 
-async function checkEnv(panel: vscode.WebviewPanel): Promise<void> {
+async function checkEnv(panel: ChatHost): Promise<void> {
   const remote = detectRemoteStatus()
   const env: EnvStatus = {
     python: fs.existsSync(pythonPath()),
@@ -153,7 +160,7 @@ async function checkEnv(panel: vscode.WebviewPanel): Promise<void> {
   panel.webview.postMessage({ type: "settings_data", env })
 }
 
-async function testConnection(panel: vscode.WebviewPanel): Promise<void> {
+async function testConnection(panel: ChatHost): Promise<void> {
   panel.webview.postMessage({ type: "settings_test_result", ok: false, message: "正在测试连接..." })
   try {
     const { stdout } = await execAsync(`${pythonPath()} ${BIOMNI_DIR}/scripts/test_api.py`, { timeout: 60000 })
@@ -179,7 +186,7 @@ function saveByok(byok: ByokConfig, apiKey: string): void {
 }
 
 /** 一键部署（E1 环境 + biomni 包）：无 biomni_e1 环境则跑完整脚本；有则快速升级 biomni */
-async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {  const progress = (line: string) => panel.webview.postMessage({ type: "deploy_progress", line, source: "deploy" })
+async function runDeploy(panel: ChatHost): Promise<void> {  const progress = (line: string) => panel.webview.postMessage({ type: "deploy_progress", line, source: "deploy" })
   // SSH/平台检测：非 Linux 主机拒绝部署
   const remote = detectRemoteStatus()
   if (!remote.ok) {
@@ -280,7 +287,7 @@ async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {  const pro
 }
 
 /** 应用 biomni-chat 对 A1 的补丁（会话级记忆 thread 隔离等）。每次部署/升级后都应执行 */
-async function applyPatch(panel: vscode.WebviewPanel, py: string): Promise<void> {
+async function applyPatch(panel: ChatHost, py: string): Promise<void> {
   const progress = (line: string) =>
     panel.webview.postMessage({ type: "deploy_progress", line, source: "deploy" })
   const patchScript = path.join(__dirname, "..", "python", "patch_a1.py")
@@ -309,7 +316,7 @@ async function applyPatch(panel: vscode.WebviewPanel, py: string): Promise<void>
 }
 
 /** 下载 Data lake（~11GB，流式进度） */
-async function runDeployL2(panel: vscode.WebviewPanel): Promise<void> {
+async function runDeployL2(panel: ChatHost): Promise<void> {
   const progress = (line: string) => panel.webview.postMessage({ type: "deploy_progress", line, source: "l2" })
   const remote = detectRemoteStatus()
   if (!remote.ok) {
@@ -355,41 +362,26 @@ async function runDeployL2(panel: vscode.WebviewPanel): Promise<void> {
   })
 }
 
-function openChatPanel(context: vscode.ExtensionContext): void {
-  if (currentPanel) {
-    currentPanel.reveal(vscode.ViewColumn.One)
-    return
-  }
-
-  const panel = vscode.window.createWebviewPanel(
-    "biomniChat",
-    "Biomni Chat",
-    vscode.ViewColumn.One,
-    {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "out", "webview")],
-    },
-  )
-
+/** 通用启动：给任一宿主（编辑器面板 / 侧边栏视图）装配聊天 UI + bridge 进程 */
+function startChatHost(host: ChatHost, context: vscode.ExtensionContext): BiomniBridge {
   const config = vscode.workspace.getConfiguration("biomniChat")
   const pythonPath = config.get<string>("pythonPath") || "/data/biomni/envs/biomni_e1/bin/python"
   const bridgeScript = config.get<string>("bridgeScript") || "/data/biomni-chat/python/biomni_bridge.py"
 
-  panel.webview.html = getWebviewHtml(panel, context.extensionUri)
+  host.webview.html = getWebviewHtml(host, context.extensionUri)
 
   // 启动 Biomni 桥（服务器侧 python 进程）
   const bridge = new BiomniBridge(pythonPath, bridgeScript, (msg) => {
-    panel.webview.postMessage(msg satisfies ExtToWebview)
+    host.webview.postMessage(msg satisfies ExtToWebview)
   })
   bridge.start()
 
-  panel.webview.onDidReceiveMessage((msg: WebviewToExt) => {
+  host.webview.onDidReceiveMessage((msg: WebviewToExt) => {
     switch (msg.type) {
       case "send":
         if (msg.prompt) {
           // 解析 prompt 中的 @文件 提及，把文件内容注入上下文
-          injectMentionedFiles(panel, msg.prompt, (augmented) => {
+          injectMentionedFiles(host, msg.prompt, (augmented) => {
             bridge.chat(augmented, msg.mode || "plan", msg.history, msg.sessionId)
           })
         }
@@ -413,13 +405,13 @@ function openChatPanel(context: vscode.ExtensionContext): void {
         exportReport(msg.content ?? "")
         break
       case "mention_open":
-        listWorkspaceFiles(panel)
+        listWorkspaceFiles(host)
         break
       case "generate_title":
         bridge.generateTitle(msg.prompt || "")
         break
       case "settings_load":
-        void readSettings(panel)
+        void readSettings(host)
         break
       case "settings_save":
         if (msg.byok) {
@@ -428,7 +420,7 @@ function openChatPanel(context: vscode.ExtensionContext): void {
         }
         break
       case "settings_test":
-        void testConnection(panel)
+        void testConnection(host)
         break
       case "mirror_save":
         if (msg.mirrors) {
@@ -437,13 +429,13 @@ function openChatPanel(context: vscode.ExtensionContext): void {
         }
         break
       case "env_check":
-        void checkEnv(panel)
+        void checkEnv(host)
         break
       case "deploy":
-        void runDeploy(panel)
+        void runDeploy(host)
         break
       case "deploy_l2":
-        void runDeployL2(panel)
+        void runDeployL2(host)
         break
       case "ready":
         // webview 就绪，无需额外操作
@@ -451,14 +443,45 @@ function openChatPanel(context: vscode.ExtensionContext): void {
     }
   })
 
+  host.onDidDispose(() => bridge.dispose())
+  return bridge
+}
+
+/** 侧边栏视图提供者：活动栏 Biomni 图标 → 侧边栏聊天（可拖到右侧辅助侧边栏，像 Cline） */
+class ChatViewProvider implements vscode.WebviewViewProvider {
+  constructor(private readonly context: vscode.ExtensionContext) {}
+  resolveWebviewView(webviewView: vscode.WebviewView): void {
+    webviewView.webview.options = {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, "out", "webview")],
+    }
+    webviewView.title = "Biomni Chat"
+    startChatHost(webviewView, this.context)
+  }
+}
+
+function openChatPanel(context: vscode.ExtensionContext): void {
+  if (currentPanel) {
+    currentPanel.reveal(vscode.ViewColumn.One)
+    return
+  }
+
+  const panel = vscode.window.createWebviewPanel(
+    "biomniChat",
+    "Biomni Chat",
+    vscode.ViewColumn.One,
+    {
+      enableScripts: true,
+      retainContextWhenHidden: true,
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "out", "webview")],
+    },
+  )
+  currentBridge = startChatHost(panel, context)
   panel.onDidDispose(() => {
-    bridge.dispose()
     currentPanel = null
     currentBridge = null
   })
-
   currentPanel = panel
-  currentBridge = bridge
 }
 
 // 二进制/生成目录黑名单，@文件列表时跳过
@@ -466,7 +489,7 @@ const BINARY_EXT = /\.(png|jpe?g|gif|webp|ico|pdf|zip|tar|gz|rds|rdata|h5|h5ad|b
 
 /** 解析 prompt 中的 @文件 提及，读取内容后拼接到 prompt */
 function injectMentionedFiles(
-  panel: vscode.WebviewPanel,
+  panel: ChatHost,
   prompt: string,
   cb: (augmented: string) => void,
 ): void {
@@ -501,7 +524,7 @@ function injectMentionedFiles(
 }
 
 /** 列出工作区文本文件（相对路径），发给 webview 供 @ 提及 */
-async function listWorkspaceFiles(panel: vscode.WebviewPanel): Promise<void> {
+async function listWorkspaceFiles(panel: ChatHost): Promise<void> {
   const root = vscode.workspace.workspaceFolders?.[0]
   if (!root) {
     panel.webview.postMessage({ type: "mention_files", files: [] })
@@ -535,7 +558,7 @@ async function exportReport(content: string): Promise<void> {
   }
 }
 
-function getWebviewHtml(panel: vscode.WebviewPanel, extensionUri: vscode.Uri): string {
+function getWebviewHtml(panel: ChatHost, extensionUri: vscode.Uri): string {
   const indexPath = vscode.Uri.joinPath(extensionUri, "out", "webview", "index.html")
   let html = fs.readFileSync(indexPath.fsPath, "utf-8")
 

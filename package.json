@@ -13,7 +13,8 @@
     "vscode": "^1.90.0"
   },
   "activationEvents": [
-    "onCommand:biomniChat.open"
+    "onCommand:biomniChat.open",
+    "onView:biomniChat.view"
   ],
   "categories": [
     "Other"
@@ -30,9 +31,28 @@
     "out/**",
     "python/biomni_bridge.py",
     "python/patch_a1.py",
+    "media/icon.svg",
     "README.md"
   ],
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "biomniChat",
+          "title": "Biomni Chat",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "biomniChat": [
+        {
+          "type": "webview",
+          "id": "biomniChat.view",
+          "name": "Biomni Chat"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "biomniChat.open",
