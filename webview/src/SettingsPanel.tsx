@@ -65,7 +65,7 @@ export function SettingsPanel({ vscode }: Props) {
       } else if (msg.type === "settings_test_result") {
         setTestResult(`${msg.ok ? "✅ 连接成功" : "❌ 连接失败"}\n${msg.message || ""}`)
       } else if (msg.type === "deploy_progress") {
-        // 部署进度：按来源分发（deploy=L0L1, l2=数据湖）
+        // 部署进度：按来源分发（deploy=E1环境+biomni, l2=Data lake）
         const line = String(msg.line ?? "")
         if (msg.source === "l2") {
           setDeployingL2(true)
@@ -206,7 +206,7 @@ export function SettingsPanel({ vscode }: Props) {
             <div className={env.biomni ? "ok" : "bad"}>biomni 包: {env.biomni ? "✅ 已安装" : "❌ 缺失"}</div>
             <div>生信工具: {env.tools.length > 0 ? `✅ ${env.tools.join(" / ")}` : "（未检测到）"}</div>
             <div className={env.dataLake ? "ok" : "bad"}>
-              数据湖: {env.dataLake ? `✅ ${env.dataLakeSize}` : "（未下载，运行时按需自动获取）"}
+              Data lake: {env.dataLake ? `✅ ${env.dataLakeSize}` : "（未下载，运行时按需自动获取）"}
             </div>
             <div className={env.envFile ? "ok" : "bad"}>
               .env 配置: {env.envFile ? "✅ 存在" : "❌ 缺失"}
@@ -220,14 +220,14 @@ export function SettingsPanel({ vscode }: Props) {
             {checking ? "检测中..." : "重新检测"}
           </button>
           <button className="plan-btn primary" onClick={runDeploy} disabled={deploying || (env ? !env.remoteOk : false)}>
-            {deploying ? "部署中..." : env && !env.remoteOk ? "部署不可用（非 Linux 主机）" : "一键部署（L0+L1）"}
+            {deploying ? "部署中..." : env && !env.remoteOk ? "部署不可用（非 Linux 主机）" : "一键部署（E1 环境 + biomni 包）"}
           </button>
           <button
             className="plan-btn"
             onClick={runDeployL2}
             disabled={deployingL2 || (env ? !env.remoteOk : false) || (env ? !env.python : false)}
           >
-            {deployingL2 ? "下载中..." : "下载数据湖（L2）"}
+            {deployingL2 ? "下载中..." : "下载 Data lake"}
           </button>
         </div>
         {(deploying || deployLines.length > 0) && (

@@ -79,7 +79,7 @@ export interface ExtToWebview {
   items?: TodoItem[] | DeliverableItem[] // todo_update 动态 todo / deliverables 交付物
   dir?: string // deliverables 交付物根目录（绝对路径）
   fresh?: boolean // act_start 是否新建执行卡片（plan 确认后=true；act 直接执行=false）
-  source?: string // deploy_progress/result 来源（deploy=L0L1, l2=数据湖）
+  source?: string // deploy_progress/result 来源（deploy=E1环境+biomni, l2=Data lake）
   byok?: ByokConfig
   mirrors?: MirrorConfig
   env?: EnvStatus

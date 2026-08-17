@@ -10,7 +10,7 @@ Biomni AI agent chat for VS Code, running on your Linux bioinformatics server.
 - **执行过程时间线**：思维链 + 工具调用交错展示，状态颜色编码（思考/工具/代码/完成/错误）
 - **多会话管理**：侧边栏会话列表、LLM 自动命名、本地持久化（重启保留）、上下文隔离
 - **消息操作**：复制 / 重试 / 编辑重发 / 还原检查点 / 删除
-- **设置页**：BYOK 模型配置（DeepSeek / OpenAI / Anthropic / 自定义）、镜像源、环境检测、一键部署（L0+L1）与数据湖下载（L2）
+- **设置页**：BYOK 模型配置（DeepSeek / OpenAI / Anthropic / 自定义）、镜像源、环境检测、一键部署（E1 环境 + biomni 包）与 Data lake 下载
 - **报告导出**：会话 / 研究计划 / 执行报告导出为 Markdown
 - **@ 文件提及**：把工作区文件内容注入给 agent
 
@@ -23,7 +23,7 @@ Biomni AI agent chat for VS Code, running on your Linux bioinformatics server.
 
 ## Quick Start
 1. 打开 Biomni Chat（命令面板 → `Biomni Chat: Open Chat`）
-2. 首次使用：进入「设置」→ 配置模型（BYOK）→ 测试连接 → 环境检测 → 一键部署（L0+L1，约 30-60 分钟）
+2. 首次使用：进入「设置」→ 配置模型（BYOK）→ 测试连接 → 环境检测 → 一键部署（E1 环境 + biomni 包，约 30-60 分钟）
 3. 开始对话：**Plan** 模式发研究任务（自动规划），**Act** 模式直接执行
 
 ## Platform Support

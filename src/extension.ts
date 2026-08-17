@@ -178,7 +178,7 @@ function saveByok(byok: ByokConfig, apiKey: string): void {
   fs.writeFileSync(ENV_FILE, content)
 }
 
-/** 一键部署（L0+L1）：无 biomni_e1 环境则跑完整脚本；有则快速升级 biomni */
+/** 一键部署（E1 环境 + biomni 包）：无 biomni_e1 环境则跑完整脚本；有则快速升级 biomni */
 async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {  const progress = (line: string) => panel.webview.postMessage({ type: "deploy_progress", line, source: "deploy" })
   // SSH/平台检测：非 Linux 主机拒绝部署
   const remote = detectRemoteStatus()
@@ -195,7 +195,7 @@ async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {  const pro
 
   const py = pythonPath()
   if (!fs.existsSync(py)) {
-    // 新用户：完整部署 L0+L1（创建 conda 环境 + 生物工具 + R）
+    // 新用户：完整部署 E1 环境 + biomni 包（创建 conda 环境 + 生物工具 + R）
     const script = "/data/biomni/scripts/install_biomni_e1.sh"
     if (!fs.existsSync(script)) {
       panel.webview.postMessage({
@@ -206,7 +206,7 @@ async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {  const pro
       })
       return
     }
-    progress("▶ 未检测到 biomni_e1 环境，开始完整部署（L0 核心 + L1 生信工具，首次可能需要 30-60 分钟）...")
+    progress("▶ 未检测到 biomni_e1 环境，开始完整部署 E1 环境（生信工具 + 生物库 + R）并安装 biomni 包（首次可能需要 30-60 分钟）...")
     const child = spawn("bash", [script], { env: { ...process.env } })
     child.stdout.on("data", (d: Buffer) => progress(d.toString()))
     child.stderr.on("data", (d: Buffer) => progress(d.toString()))
@@ -219,7 +219,7 @@ async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {  const pro
         source: "deploy",
         ok: code === 0,
         message: code === 0
-          ? "✅ L0+L1 部署完成（biomni 核心 + 生信工具 + 生物库 + R）。\n如需数据湖(L2)，点下方「下载数据湖」。"
+          ? "✅ E1 环境 + biomni 包部署完成（生信工具 + 生物库 + R）。\n如需 Data lake，点下方「下载 Data lake」。"
           : `部署退出码: ${code}，请查看上方输出。`,
       })
       // 完整部署后应用 biomni-chat 补丁（会话级记忆等），否则新装环境缺失补丁
@@ -231,7 +231,7 @@ async function runDeploy(panel: vscode.WebviewPanel): Promise<void> {  const pro
     return
   }
 
-  // 已有环境：快速升级 biomni 及运行时依赖（L0）
+  // 已有环境：快速升级 biomni 包及运行时依赖
   progress("▶ biomni_e1 环境已存在，快速升级 biomni 及运行时依赖...")
   const mirror = "https://pypi.tuna.tsinghua.edu.cn/simple"
   const child = spawn(
@@ -308,7 +308,7 @@ async function applyPatch(panel: vscode.WebviewPanel, py: string): Promise<void>
   })
 }
 
-/** 下载数据湖（L2，~11GB，流式进度） */
+/** 下载 Data lake（~11GB，流式进度） */
 async function runDeployL2(panel: vscode.WebviewPanel): Promise<void> {
   const progress = (line: string) => panel.webview.postMessage({ type: "deploy_progress", line, source: "l2" })
   const remote = detectRemoteStatus()
@@ -327,7 +327,7 @@ async function runDeployL2(panel: vscode.WebviewPanel): Promise<void> {
       type: "deploy_result",
       source: "l2",
       ok: false,
-      message: "❌ 请先完成 L0/L1 部署（需要 biomni_e1 环境）再下载数据湖。",
+      message: "❌ 请先完成 E1 环境 + biomni 包部署（需要 biomni_e1 环境）再下载 Data lake。",
     })
     return
   }
@@ -337,7 +337,7 @@ async function runDeployL2(panel: vscode.WebviewPanel): Promise<void> {
     return
   }
   progress(remote.mode)
-  progress("▶ 开始下载数据湖（L2，约 11GB，请耐心等待；中断后已下载文件保留，可续传）...")
+  progress("▶ 开始下载 Data lake（约 11GB，请耐心等待；中断后已下载文件保留，可续传）...")
   const child = spawn(py, [script], { env: { ...process.env } })
   child.stdout.on("data", (d: Buffer) => progress(d.toString()))
   child.stderr.on("data", (d: Buffer) => progress(d.toString()))
@@ -349,7 +349,7 @@ async function runDeployL2(panel: vscode.WebviewPanel): Promise<void> {
       type: "deploy_result",
       source: "l2",
       ok: code === 0,
-      message: code === 0 ? "✅ 数据湖（L2）下载完成。" : `下载退出码: ${code}，可重新运行续传。`,
+      message: code === 0 ? "✅ Data lake 下载完成。" : `下载退出码: ${code}，可重新运行续传。`,
     })
     void checkEnv(panel)
   })
